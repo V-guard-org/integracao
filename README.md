@@ -73,6 +73,27 @@ python3 vguard.py --source video.mp4         # no notebook, com HUD (q para sair
 
 Outras opções: `--source 0` (índice da câmera), `--width`/`--height` (padrão 640×480).
 
+### Raspberry Pi 4B: ambiente validado e execução local
+
+Na Pi 4B sem AES, utilize Python 3.11 e as versões de `requirements-pi4-py311.txt`.
+O ambiente já validado está em `/home/vguard/vguard/compat/mediapipe-0.10.18-py311/.venv`.
+Não aplique `vision/requirements.txt` a esse ambiente: MediaPipe 0.10.18 exige NumPy <2.
+Não instale simultaneamente `opencv-python` e `opencv-contrib-python`.
+
+Com o modelo em `vision/models/face_landmarker.task`, execute:
+
+```bash
+cd /home/vguard/vguard/integracao
+VGUARD_DATA=/home/vguard/vguard/dados-integracao \
+  /home/vguard/vguard/compat/mediapipe-0.10.18-py311/.venv/bin/python -B \
+  vguard.py --headless --source 0 --no-uart --no-sync
+```
+
+`--no-sync` não inicia a thread nem acessa o backend. `--no-uart` não inicia o leitor.
+Para uma execução limitada, acrescente `--max-frames 120`. Ctrl+C ou SIGTERM encerram
+os componentes antes de fechar o banco. A sincronização aguarda sua thread terminar;
+se houver envio em andamento, o encerramento pode esperar o timeout da conexão.
+
 Sem o ESP32 conectado, o `UartReader` só registra um aviso a cada 2 s e tenta de novo.
 A visão e a gravação de eventos continuam funcionando.
 
@@ -110,6 +131,7 @@ Cada arquivo de teste roda sozinho. A partir de `integracao/`:
 
 ```bash
 (cd events && python3 test_event_manager.py && python3 test_sync.py)
+python3 -B test_vguard.py
 ```
 
 Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`.
@@ -118,9 +140,20 @@ Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`
 `events/test_uart_reader.py` precisa do ESP32 simulado em `../firmware_telemetria/host/fake_esp32.py`
 (ou `VGUARD_FIRMWARE=<pasta>`).
 
+Teste opt-in da aplicação com webcam e persistência reais, sem UART/backend:
+
+```bash
+python3 -B tools/validate_camera_persistence.py --data-dir /caminho/novo-exclusivo-do-teste
+```
+
+O teste usa o ponto de entrada integrado e injeta métricas sintéticas no detector temporal.
+O evento recebe `type=teste_integracao_sintetico_fadiga`; o JPEG é do frame real.
+Um manifesto identifica os dados de teste. O diretório precisa ser novo para não misturar
+esses eventos com registros reais. Na Pi, use o interpretador 3.11 validado acima.
+
 ## Pendências
 
 - **GPS (RF02):** nada chama `manager.update("gps", ...)` ainda, então os eventos saem sem posição.
   Falta um leitor do GPS no mesmo formato do `UartReader`.
-- **Cópias duplicadas:** `../visao` e `../gerenciador_eventos` ainda existem. As correções devem
-  ser feitas aqui; o melhor é apagar ou arquivar as originais para não divergirem.
+- **Responsabilidade:** adaptações para execução conjunta são mantidas neste repositório;
+  não há sincronização automática com `visao` ou `gerenciador_eventos`. Os originais são preservados.

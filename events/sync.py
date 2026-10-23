@@ -134,6 +134,7 @@ class Sync:
         self.link = link
         self.last_contact = None
         self._stop = threading.Event()
+        self._thread = None
 
     def sync_once(self):
         """
@@ -276,7 +277,10 @@ class Sync:
     def start(self):
         if not DEVICE_TOKEN:
             logging.warning("VGUARD_TOKEN vazio: o backend vai recusar tudo (401)")
-        threading.Thread(target=self.run, daemon=True).start()
+        self._thread = threading.Thread(target=self.run, daemon=True)
+        self._thread.start()
 
     def stop(self):
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join()

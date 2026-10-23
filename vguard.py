@@ -11,7 +11,10 @@ A visão roda na thread principal (cv2.imshow exige); UART e Sync em threads.
     python3 vguard.py --source video.mp4      # no notebook
 """
 
+import argparse
+import logging
 import os
+import signal
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,27 +26,47 @@ from uart_reader import UartReader
 from main import VisionPipeline, parse_args  # vision/main.py
 
 
-def run():
-    args = parse_args()
+def run(argv=None):
+    parser = argparse.ArgumentParser(description="V-GUARD — aplicação integrada da Raspberry Pi")
+    parser.add_argument("--no-uart", action="store_true", help="Executa sem iniciar o leitor do ESP32")
+    parser.add_argument("--no-sync", action="store_true", help="Desativa sincronização e acesso ao backend")
+    parser.add_argument("--max-frames", type=int, help="Encerra após processar este número de frames")
+    args = parse_args(argv, parser=parser)
+    if args.max_frames is not None and args.max_frames <= 0:
+        parser.error("--max-frames deve ser maior que zero")
     manager = EventManager(os.environ.get("VGUARD_DATA", "dados"))
-    reader = UartReader(manager)
-    sync = Sync(manager)
-    reader.start()
-    sync.start()
+    reader = None
+    sync = None
 
     try:
-        VisionPipeline(
+        if not args.no_uart:
+            reader = UartReader(manager)
+            reader.start()
+        if not args.no_sync:
+            sync = Sync(manager)
+            sync.start()
+        return VisionPipeline(
             event_manager=manager,
             headless=args.headless,
             source=int(args.source) if args.source.isdigit() else args.source,
             frame_width=args.width,
             frame_height=args.height,
+            max_frames=args.max_frames,
         ).run()
+    except KeyboardInterrupt:
+        logging.info("encerramento solicitado")
     finally:
-        reader.stop()
-        sync.stop()
+        if reader is not None:
+            reader.stop()
+        if sync is not None:
+            sync.stop()
         manager.close()
 
 
+def _request_stop(signum, frame):
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _request_stop)
     run()

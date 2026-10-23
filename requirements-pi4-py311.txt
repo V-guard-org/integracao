@@ -1,0 +1,8 @@
+# Alvo validado: Raspberry Pi 4B Cortex-A72, Debian ARM64, CPython 3.11.
+# Usar o ambiente existente; este arquivo não deve ser aplicado à .venv Python 3.13.
+# Uma única distribuição fornece cv2, também exigida pelo MediaPipe.
+mediapipe==0.10.18
+numpy==1.26.4
+opencv-contrib-python==4.11.0.86
+jax==0.4.35
+jaxlib==0.4.35

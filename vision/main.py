@@ -186,7 +186,11 @@ class VisionPipeline:
         Retorna o numero total de eventos registrados durante a sessao.
         """
         cap = self._open_capture()
-        landmarker = self._init_landmarker()
+        try:
+            landmarker = self._init_landmarker()
+        except BaseException:
+            cap.release()
+            raise
 
         print(f"[V-GUARD Vision] Iniciando pipeline (source={self.source}, headless={self.headless})...")
 
@@ -310,8 +314,8 @@ class VisionPipeline:
 # 3. INTERFACE DE LINHA DE COMANDO (CLI)
 # ==============================================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser(
+def parse_args(argv=None, parser=None):
+    parser = parser or argparse.ArgumentParser(
         description="V-GUARD - Modulo de Visao Computacional (Monitoramento de Motorista)"
     )
     parser.add_argument(
@@ -337,4 +341,4 @@ def parse_args():
         default=FRAME_HEIGHT,
         help=f"Altura alvo de captura (padrao: {FRAME_HEIGHT})",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
