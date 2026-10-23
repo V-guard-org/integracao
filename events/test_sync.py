@@ -91,6 +91,12 @@ def main():
     }
     assert service.last_contact is not None
 
+    # A saúde vai no começo e, como a fila mudou, de novo no fim, já com
+    # as pendências depois do envio.
+    first_health, last_health = [json.loads(body) for body in received("/health")]
+    assert first_health["pending"] == {"telemetry": 30, "events": 2, "photos": 2}
+    assert last_health["pending"] == {"telemetry": 0, "events": 0, "photos": 1}
+
     # Nada é reenviado no ciclo seguinte, nem o evento recusado.
     count = len(Backend.received)
     service.sync_once()

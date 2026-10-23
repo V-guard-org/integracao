@@ -170,7 +170,9 @@ class Sync:
             return CONFIRMED
 
         try:
+            # No começo: sinal de vida, mesmo que algum item falhe adiante.
             send("POST", "/health", self.health(link))
+            before = manager.pending_counts()
 
             while batch := manager.pending_telemetry(TELEMETRY_BATCH):
                 state = send("POST", "/telemetry", {"items": batch})
@@ -198,6 +200,11 @@ class Sync:
                     "PUT", "/events/" + event_id + "/photo", jpeg, "image/jpeg"
                 )
                 manager.ack_photo(event_id, state)
+
+            # De novo no fim, se a fila mudou: senão o dashboard mostraria
+            # as pendências de antes do envio até o próximo ciclo.
+            if manager.pending_counts() != before:
+                send("POST", "/health", self.health(link))
 
         finally:
             connection.close()
