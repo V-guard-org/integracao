@@ -7,6 +7,7 @@ Verificação da sincronização contra um backend falso local. Executar:
 
 import http.server
 import json
+import os
 import tempfile
 import threading
 
@@ -57,6 +58,9 @@ def main():
 
     sync.BACKEND_URL = "http://127.0.0.1:%d/api" % server.server_port
     sync.DEVICE_TOKEN = "segredo"
+
+    # Backend na mesma máquina (notebook): conta como Wi-Fi.
+    assert sync.active_link() == "wifi"
 
     manager = EventManager(tempfile.mkdtemp())
     for i in range(300):
@@ -116,6 +120,15 @@ def main():
     # ...e é reenviada inteira no ciclo seguinte.
     assert service.sync_once() == "wifi"
     assert received("/photo") == [JPEG]
+    assert manager.pending_photos() == []
+
+    # Foto apagada do cartão à mão: sai da fila e não trava as seguintes.
+    gone = manager.record_event("fadiga", 0.8, JPEG, 1500.0)
+    manager.record_event("distracao", 0.8, JPEG + b"2", 1506.0)
+    manager.update("imu", {"ax": 0}, 1520.0)     # fecha as janelas
+    os.remove(os.path.join(manager.photo_dir, gone + ".jpg"))
+    assert service.sync_once() == "wifi"
+    assert received("/photo")[-1] == JPEG + b"2"
     assert manager.pending_photos() == []
 
     # Backend respondendo 500: o dado novo continua pendente.

@@ -89,6 +89,11 @@ def active_link():
         if device in CELLULAR_DEVICES:
             return "cellular"
 
+        # Backend na mesma máquina (desenvolvimento no notebook): sem custo
+        # de franquia, vale como Wi-Fi. Na Pi o backend é remoto e nunca cai aqui.
+        if device == "lo":
+            return "wifi"
+
         kind, connection = _run(
             "nmcli", "-g", "GENERAL.TYPE,GENERAL.CONNECTION",
             "device", "show", device
@@ -193,8 +198,15 @@ class Sync:
                 if self.link() != "wifi":
                     break
 
-                with open(path, "rb") as f:
-                    jpeg = f.read()
+                try:
+                    with open(path, "rb") as f:
+                        jpeg = f.read()
+                except FileNotFoundError:
+                    # Apagada do cartão à mão: nunca vai subir. Sem isto, a
+                    # primeira foto ausente travaria a fila de fotos para sempre.
+                    logging.warning("foto do evento %s não existe mais no cartão", event_id)
+                    manager.ack_photo(event_id, FAILED)
+                    continue
 
                 state = send(
                     "PUT", "/events/" + event_id + "/photo", jpeg, "image/jpeg"
@@ -240,11 +252,19 @@ class Sync:
 
     def run(self):
         delay = SYNC_INTERVAL
+        last_link = "?"
 
         while not self._stop.wait(delay):
             try:
-                self.sync_once()
+                link = self.sync_once()
                 delay = SYNC_INTERVAL
+
+                # Avisa só quando o enlace muda, para não repetir a cada ciclo.
+                if link != last_link:
+                    logging.warning(
+                        "enlace: %s", link or "nenhum (os dados ficam no cartão)"
+                    )
+                    last_link = link
 
             except (OSError, http.client.HTTPException, Retry) as error:
                 delay = min(delay * 2, RETRY_MAX)
@@ -254,6 +274,8 @@ class Sync:
                 )
 
     def start(self):
+        if not DEVICE_TOKEN:
+            logging.warning("VGUARD_TOKEN vazio: o backend vai recusar tudo (401)")
         threading.Thread(target=self.run, daemon=True).start()
 
     def stop(self):
