@@ -1,0 +1,39 @@
+# Dados gravados pelo vguard.py: banco, telemetria e fotos do motorista.
+# Nunca versionar (privacidade).
+dados/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+*.jpg
+captures/
+recordings/
+*.mp4
+*.avi
+*.mkv
+*.h264
+*.webm
+logs/
+*.log
+
+# Modelo do MediaPipe (baixado por vision/scripts/download_model.py)
+*.task
+!vision/models/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Editores, ferramentas e sistema
+.vscode/
+.idea/
+*.swp
+.claude/
+CLAUDE.md
+graphify-out/
+.DS_Store
+Thumbs.db

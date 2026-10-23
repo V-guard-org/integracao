@@ -56,6 +56,8 @@ event_id = manager.record_event(
 
 ## Executar
 
+Todos os comandos abaixo partem de `integracao/`.
+
 ```bash
 pip install -r vision/requirements.txt
 python3 vision/scripts/download_model.py     # baixa vision/models/face_landmarker.task (se faltar)
@@ -100,15 +102,17 @@ e os estados de sincronização separados: `meta_synced` e `photo_synced` (RF18)
 
 ## Testes
 
-Cada arquivo de teste roda sozinho, de dentro da sua pasta:
+Cada arquivo de teste roda sozinho. A partir de `integracao/`:
 
 ```bash
-cd vision && python3 test_metrics.py && python3 test_detector.py && python3 test_pipeline_integration.py
+(cd vision && python3 test_metrics.py && python3 test_detector.py && python3 test_pipeline_integration.py)
 ```
 
 ```bash
-cd events && python3 test_event_manager.py && python3 test_sync.py
+(cd events && python3 test_event_manager.py && python3 test_sync.py)
 ```
+
+Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`.
 
 `test_pipeline_integration.py` usa um mock do `EventManager` com a mesma assinatura do real.
 `events/test_uart_reader.py` precisa do ESP32 simulado em `../firmware_telemetria/host/fake_esp32.py`
