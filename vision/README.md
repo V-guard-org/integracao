@@ -34,8 +34,8 @@ edge/vguard/vision/
 │
 ├── config.py                       # Constantes, índices MediaPipe, modelo 3D canônico e limiares
 ├── metrics.py                      # Funções matemáticas puras (EAR, MAR em pixels e solvePnP)
-├── detector.py                     # Análise temporal, máquina de estados, histerese e cooldown
-├── main.py                         # Orquestrador do pipeline (suporte a GUI e modo headless)
+├── detector.py                     # Análise temporal, máquina de estados e histerese
+├── main.py                         # VisionPipeline (entrada: ../vguard.py)
 ├── test_metrics.py                 # Testes unitários de EAR, MAR, Head Pose e aspect ratio
 ├── test_detector.py                # Testes de validação temporal do detector
 ├── test_pipeline_integration.py    # Teste de integração end-to-end com Mock do EventManager
@@ -118,19 +118,19 @@ Com o ambiente virtual ativado:
 
 **Modo com Interface Gráfica / Depuração:**
 ```bash
-python main.py
+python ../vguard.py
 ```
 O programa abrirá a webcam e exibirá o overlay com EAR, MAR, Head Pose, Estado e FPS.
 Pressione **Q** para encerrar.
 
 **Modo Headless (Sem interface gráfica — recomendado para Raspberry Pi):**
 ```bash
-python main.py --headless
+python ../vguard.py --headless
 ```
 
 **Executar a partir de arquivo de vídeo gravado:**
 ```bash
-python main.py --source video_teste.mp4
+python ../vguard.py --source video_teste.mp4
 ```
 
 #### 7. Testes Automatizados
@@ -159,7 +159,7 @@ Landmarks Faciais (478 pontos)
    ↓
 metrics.py (EAR + MAR desnormalizados em pixels + solvePnP)
    ↓
-detector.py (Análise temporal, histerese 0.15s, cooldown 5.0s)
+detector.py (Análise temporal, histerese 0.15s; cooldown 5.0s fica no EventManager)
    ↓
 EventManager.record_event(type, score, jpeg, ts) [codificação sob demanda]
 ```

@@ -51,23 +51,10 @@ class FrameMetrics:
 
 def to_pixel_coords(landmark: Any, width: int, height: int) -> Tuple[float, float]:
     """
-    Converte coordenadas normalizadas [0.0, 1.0] para coordenadas em pixels reais.
-    Compativel com objetos MediaPipe (NormalizedLandmark), dicionarios, tuplas ou listas.
+    Converte coordenadas normalizadas [0.0, 1.0] (NormalizedLandmark do MediaPipe)
+    para coordenadas em pixels reais.
     """
-    if hasattr(landmark, "x") and hasattr(landmark, "y"):
-        return float(landmark.x * width), float(landmark.y * height)
-    elif isinstance(landmark, dict):
-        return float(landmark["x"] * width), float(landmark["y"] * height)
-    elif isinstance(landmark, (tuple, list)) and len(landmark) >= 2:
-        return float(landmark[0] * width), float(landmark[1] * height)
-    raise TypeError(f"Tipo de landmark nao suportado: {type(landmark)}")
-
-
-def euclidean_distance_2d(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-    """
-    Calcula a distancia euclidiana entre dois pontos 2D em coordenadas de pixels.
-    """
-    return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+    return float(landmark.x * width), float(landmark.y * height)
 
 
 # ==============================================================================
@@ -81,16 +68,11 @@ def _calculate_single_eye_ear(
     Calcula o EAR para um unico olho a partir de 6 pontos em pixels:
     EAR = (|p2 - p6| + |p3 - p5|) / (2 * |p1 - p4|)
     """
-    p1 = to_pixel_coords(landmarks[indices[0]], width, height)
-    p2 = to_pixel_coords(landmarks[indices[1]], width, height)
-    p3 = to_pixel_coords(landmarks[indices[2]], width, height)
-    p4 = to_pixel_coords(landmarks[indices[3]], width, height)
-    p5 = to_pixel_coords(landmarks[indices[4]], width, height)
-    p6 = to_pixel_coords(landmarks[indices[5]], width, height)
+    p1, p2, p3, p4, p5, p6 = (to_pixel_coords(landmarks[i], width, height) for i in indices)
 
-    vertical_1 = euclidean_distance_2d(p2, p6)
-    vertical_2 = euclidean_distance_2d(p3, p5)
-    horizontal = euclidean_distance_2d(p1, p4)
+    vertical_1 = math.dist(p2, p6)
+    vertical_2 = math.dist(p3, p5)
+    horizontal = math.dist(p1, p4)
 
     if horizontal <= 1e-6:
         return 0.0
@@ -122,8 +104,8 @@ def calculate_mar(landmarks: Sequence[Any], width: int, height: int) -> float:
     p_top = to_pixel_coords(landmarks[MOUTH_INDICES[2]], width, height)
     p_bottom = to_pixel_coords(landmarks[MOUTH_INDICES[3]], width, height)
 
-    horizontal = euclidean_distance_2d(p_left, p_right)
-    vertical = euclidean_distance_2d(p_top, p_bottom)
+    horizontal = math.dist(p_left, p_right)
+    vertical = math.dist(p_top, p_bottom)
 
     if horizontal <= 1e-6:
         return 0.0
@@ -184,10 +166,7 @@ def calculate_head_pose(
     rotation_matrix, _ = cv2.Rodrigues(rvec)
     angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_matrix)
 
-    pitch = float(angles[0])
-    yaw = float(angles[1])
-    roll = float(angles[2])
-
+    pitch, yaw, roll = map(float, angles)
     return pitch, yaw, roll
 
 

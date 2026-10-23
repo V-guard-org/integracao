@@ -3,17 +3,15 @@ Modulo de analise temporal e deteccao de estado do motorista do V-GUARD.
 
 Processa metricas instantaneas (FrameMetrics) ao longo do tempo usando relogio
 monotonico injetavel, aplicando histerese/tolerancia a ruido (grace period),
-trava de episodio (latch) e cooldown independente por tipo de evento.
+e trava de episodio (latch). O cooldown entre eventos fica no EventManager.
 """
 
 from dataclasses import dataclass
 from typing import Optional
-import time
 
 from config import (
     DISTRACTION_DURATION_S,
     EAR_THRESHOLD,
-    EVENT_COOLDOWN_S,
     EYES_CLOSED_DURATION_S,
     GRACE_PERIOD_S,
     MAR_THRESHOLD,
@@ -126,13 +124,6 @@ class TemporalConditionTracker:
             return True
         return False
 
-    def reset(self) -> None:
-        """Reseta completamente o estado do rastreador."""
-        self.start_time = None
-        self.last_active_time = None
-        self.duration = 0.0
-        self.episode_triggered = False
-
 
 # ==============================================================================
 # 3. CLASSE PRINCIPAL: DriverStateDetector
@@ -154,7 +145,6 @@ class DriverStateDetector:
         yawn_duration_s: float = YAWN_DURATION_S,
         distraction_duration_s: float = DISTRACTION_DURATION_S,
         grace_period_s: float = GRACE_PERIOD_S,
-        event_cooldown_s: float = EVENT_COOLDOWN_S,
     ):
         self.ear_threshold = ear_threshold
         self.mar_threshold = mar_threshold
@@ -164,8 +154,6 @@ class DriverStateDetector:
         self.eyes_closed_duration_s = eyes_closed_duration_s
         self.yawn_duration_s = yawn_duration_s
         self.distraction_duration_s = distraction_duration_s
-
-        self.event_cooldown_s = event_cooldown_s
 
         # Rastreadores temporais por condicao com histerese
         self.eyes_tracker = TemporalConditionTracker(
@@ -177,12 +165,6 @@ class DriverStateDetector:
         self.distraction_tracker = TemporalConditionTracker(
             distraction_duration_s, grace_period_s
         )
-
-        # Controle de cooldown independente por tipo de evento
-        self.last_event_time: dict[str, float] = {
-            "fadiga": -float("inf"),
-            "distracao": -float("inf"),
-        }
 
     def update(self, metrics: Optional[FrameMetrics], now: float) -> DetectionResult:
         """
@@ -223,65 +205,38 @@ class DriverStateDetector:
         yawn_crossed = self.yawn_tracker.should_trigger_episode()
         distraction_crossed = self.distraction_tracker.should_trigger_episode()
 
-        should_record = False
-        event_type: Optional[str] = None
-
-        # Prioridade 1: Fadiga (olhos fechados ou bocejo sustentado)
-        if eyes_crossed or yawn_crossed:
-            if (now - self.last_event_time["fadiga"]) >= self.event_cooldown_s:
-                should_record = True
-                event_type = "fadiga"
-                self.last_event_time["fadiga"] = now
-
-        # Prioridade 2: Distracao (somente se nao estiver disparando fadiga)
-        if not should_record and distraction_crossed:
-            # Desvio de atencao so gera evento se o motorista nao estiver com fadiga ativa
-            if not (
-                self.eyes_tracker.is_threshold_reached
-                or self.yawn_tracker.is_threshold_reached
-            ):
-                if (now - self.last_event_time["distracao"]) >= self.event_cooldown_s:
-                    should_record = True
-                    event_type = "distracao"
-                    self.last_event_time["distracao"] = now
-
-        # Determinacao do estado visual do condutor e severidade (score)
-        driver_state: str
-        score: float = 0.0
-
-        if (
+        # Prioridade: fadiga (olhos fechados ou bocejo sustentado) sobre distracao
+        fatigue = (
             self.eyes_tracker.is_threshold_reached
             or self.yawn_tracker.is_threshold_reached
-        ):
-            driver_state = "FADIGA"
-            # Calcula score continuo escalando de 0.70 a 1.0
-            if self.eyes_tracker.is_threshold_reached:
-                excess = max(0.0, eyes_dur - self.eyes_closed_duration_s)
-                score = min(1.0, 0.70 + 0.30 * (excess / 1.5))
-            else:
-                excess = max(0.0, yawn_dur - self.yawn_duration_s)
-                score = min(1.0, 0.70 + 0.30 * (excess / 1.5))
+        )
+        event_type: Optional[str] = None
+        if eyes_crossed or yawn_crossed:
+            event_type = "fadiga"
+        elif distraction_crossed and not fatigue:
+            event_type = "distracao"
+        should_record = event_type is not None
 
+        # Estado visual e severidade: 0.70 ao cruzar o limiar, ate 1.0 apos +1.5s
+        def _score(duration: float, limit: float) -> float:
+            return min(1.0, 0.70 + 0.30 * max(0.0, duration - limit) / 1.5)
+
+        score = 0.0
+        if self.eyes_tracker.is_threshold_reached:
+            driver_state = "FADIGA"
+            score = _score(eyes_dur, self.eyes_closed_duration_s)
+        elif self.yawn_tracker.is_threshold_reached:
+            driver_state = "FADIGA"
+            score = _score(yawn_dur, self.yawn_duration_s)
         elif self.distraction_tracker.is_threshold_reached:
             driver_state = "DISTRAIDO"
-            excess = max(0.0, distr_dur - self.distraction_duration_s)
-            score = min(1.0, 0.70 + 0.30 * (excess / 1.5))
-
+            score = _score(distr_dur, self.distraction_duration_s)
         elif self.eyes_tracker.is_accumulating:
             driver_state = "PISCANDO"
-            score = 0.0
-
         elif self.yawn_tracker.is_accumulating:
             driver_state = "BOCEJANDO"
-            score = 0.0
-
         else:
             driver_state = "NORMAL"
-            score = 0.0
-
-        # Regra contratual: se should_record=False, event_type deve ser None
-        if not should_record:
-            event_type = None
 
         return DetectionResult(
             driver_state=driver_state,

@@ -7,7 +7,9 @@ Pipeline de execucao:
 3. Extracao de metricas geometricas puras (EAR, MAR e Head Pose via solvePnP) com metrics.py.
 4. Analise temporal e maquina de estados do condutor via detector.py.
 5. Invocacao do EventManager do V-GUARD (com codificacao JPEG em memoria) sob demanda.
-6. Interface grafica opcional (--debug / modo visual) com suporte a execucao headless no Raspberry Pi.
+6. Interface grafica opcional com suporte a execucao headless no Raspberry Pi.
+
+Ponto de entrada: ../vguard.py (este modulo so fornece VisionPipeline e parse_args).
 """
 
 import argparse
@@ -81,120 +83,35 @@ def draw_hud(
     }
     state_color = state_colors.get(detection.driver_state, (255, 255, 255))
 
-    y = 35
-    cv2.putText(
-        frame,
-        f"Estado: {detection.driver_state}",
-        (20, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        state_color,
-        2,
-    )
-
-    y += 25
+    gray, dim = (220, 220, 220), (180, 180, 180)
     if metrics is not None:
-        cv2.putText(
-            frame,
-            f"EAR: {metrics.ear:.3f} (L:{metrics.ear_left:.2f} R:{metrics.ear_right:.2f})",
-            (20, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (220, 220, 220),
-            1,
-        )
-        y += 20
-        cv2.putText(
-            frame,
-            f"MAR: {metrics.mar:.3f}",
-            (20, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (220, 220, 220),
-            1,
-        )
-        y += 20
-        cv2.putText(
-            frame,
-            f"Pose: P:{metrics.pitch:+.1f} Y:{metrics.yaw:+.1f} R:{metrics.roll:+.1f}",
-            (20, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (220, 220, 220),
-            1,
-        )
+        face_lines = [
+            (f"EAR: {metrics.ear:.3f} (L:{metrics.ear_left:.2f} R:{metrics.ear_right:.2f})", 0.45, gray, 1, 20),
+            (f"MAR: {metrics.mar:.3f}", 0.45, gray, 1, 20),
+            (f"Pose: P:{metrics.pitch:+.1f} Y:{metrics.yaw:+.1f} R:{metrics.roll:+.1f}", 0.45, gray, 1, 22),
+        ]
     else:
-        cv2.putText(
-            frame,
-            "Rosto nao detectado",
-            (20, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 140, 255),
-            1,
-        )
-        y += 40
+        face_lines = [("Rosto nao detectado", 0.45, (0, 140, 255), 1, 62)]
 
-    y += 22
-    cv2.putText(
-        frame,
-        f"T. Olhos Fechados: {detection.eyes_closed_duration:.2f}s",
-        (20, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
-        (180, 180, 180),
-        1,
-    )
-    y += 18
-    cv2.putText(
-        frame,
-        f"T. Bocejo: {detection.yawn_duration:.2f}s",
-        (20, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
-        (180, 180, 180),
-        1,
-    )
-    y += 18
-    cv2.putText(
-        frame,
-        f"T. Distracao: {detection.distraction_duration:.2f}s",
-        (20, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
-        (180, 180, 180),
-        1,
-    )
-    y += 22
-    cv2.putText(
-        frame,
-        f"FPS: {fps:.1f}",
-        (20, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 255, 128),
-        1,
-    )
+    # (texto, escala, cor, espessura, espaco ate a proxima linha)
+    lines = [
+        (f"Estado: {detection.driver_state}", 0.65, state_color, 2, 25),
+        *face_lines,
+        (f"T. Olhos Fechados: {detection.eyes_closed_duration:.2f}s", 0.42, dim, 1, 18),
+        (f"T. Bocejo: {detection.yawn_duration:.2f}s", 0.42, dim, 1, 18),
+        (f"T. Distracao: {detection.distraction_duration:.2f}s", 0.42, dim, 1, 22),
+        (f"FPS: {fps:.1f}", 0.5, (0, 255, 128), 1, 0),
+    ]
+    y = 35
+    for text, scale, color, thickness, dy in lines:
+        cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
+        y += dy
 
     # Banner de alerta em caso de evento recente
     if alert_text:
         banner_h = 40
-        cv2.rectangle(
-            frame,
-            (0, h - banner_h),
-            (w, h),
-            (0, 0, 200),
-            -1,
-        )
-        cv2.putText(
-            frame,
-            alert_text,
-            (20, h - 12),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
-        )
+        cv2.rectangle(frame, (0, h - banner_h), (w, h), (0, 0, 200), -1)
+        cv2.putText(frame, alert_text, (20, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
 
 # ==============================================================================
@@ -209,7 +126,7 @@ class VisionPipeline:
 
     def __init__(
         self,
-        event_manager: Any = None,
+        event_manager: Any,
         headless: bool = False,
         source: Union[int, str] = 0,
         model_path: Union[str, Path] = MODEL_PATH,
@@ -257,9 +174,7 @@ class VisionPipeline:
             raise RuntimeError(f"Nao foi possivel abrir a fonte de video: {self.source}")
 
         # Tenta definir resolucao recomendada caso seja dispositivo de camera
-        if isinstance(self.source, int) or (
-            isinstance(self.source, str) and self.source.isdigit()
-        ):
+        if isinstance(self.source, int):
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
 
@@ -314,7 +229,7 @@ class VisionPipeline:
                 # Extracao de metricas geometricas puras
                 landmarks = None
                 frame_metrics: Optional[FrameMetrics] = None
-                if result.face_landmarks and len(result.face_landmarks) > 0:
+                if result.face_landmarks:
                     landmarks = result.face_landmarks[0]
                     frame_metrics = extract_all_metrics(landmarks, w, h)
 
@@ -323,7 +238,7 @@ class VisionPipeline:
 
                 # Disparo de evento sob demanda (exclusivamente quando should_record for True)
                 # Otimizacao Raspberry Pi: codifica o frame puro antes dos overlays, sem frame.copy() continuo
-                if detection.should_record and detection.event_type is not None:
+                if detection.should_record:
                     # 1. Codificacao do frame original puro em JPEG em memoria
                     success, buffer = cv2.imencode(
                         ".jpg",
@@ -335,27 +250,23 @@ class VisionPipeline:
                         jpeg_bytes = buffer.tobytes()
                         event_ts = time.time()
                         event_score = round(detection.score, 2)
-                        self.events_recorded_count += 1
 
-                        # 2. Despacho para o EventManager (se injetado) ou log no terminal
-                        if self.event_manager is not None:
-                            try:
-                                event_id = self.event_manager.record_event(
-                                    type=detection.event_type,
-                                    score=event_score,
-                                    jpeg=jpeg_bytes,
-                                    ts=event_ts,
-                                )
-                                print(
-                                    f"[EVENTO REGISTRADO] ID={event_id} Tipo='{detection.event_type}' "
-                                    f"Score={event_score} Tamanho={len(jpeg_bytes)}B"
-                                )
-                            except Exception as e:
-                                print(f"[ERRO] Falha ao registrar evento no EventManager: {e}", file=sys.stderr)
-                        else:
+                        # 2. Despacho para o EventManager (None = dentro do cooldown dele)
+                        try:
+                            event_id = self.event_manager.record_event(
+                                type=detection.event_type,
+                                score=event_score,
+                                jpeg=jpeg_bytes,
+                                ts=event_ts,
+                            )
+                        except Exception as e:
+                            event_id = None
+                            print(f"[ERRO] Falha ao registrar evento no EventManager: {e}", file=sys.stderr)
+                        if event_id is not None:
+                            self.events_recorded_count += 1
                             print(
-                                f"[EVENTO DISPARADO (STANDALONE)] Tipo='{detection.event_type}' "
-                                f"Score={event_score} Tamanho={len(jpeg_bytes)}B Ts={event_ts:.3f}"
+                                f"[EVENTO REGISTRADO] ID={event_id} Tipo='{detection.event_type}' "
+                                f"Score={event_score} Tamanho={len(jpeg_bytes)}B"
                             )
 
                         # Ativa o banner visual no modo grafico por 1.5s
@@ -427,23 +338,3 @@ def parse_args():
         help=f"Altura alvo de captura (padrao: {FRAME_HEIGHT})",
     )
     return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    # Trata indice numerico de camera vs arquivo de video
-    source: Union[int, str] = int(args.source) if args.source.isdigit() else args.source
-
-    pipeline = VisionPipeline(
-        event_manager=None,
-        headless=args.headless,
-        source=source,
-        frame_width=args.width,
-        frame_height=args.height,
-    )
-    pipeline.run()
-
-
-if __name__ == "__main__":
-    main()

@@ -98,6 +98,5 @@ EYES_CLOSED_DURATION_S: float = 1.0   # Fechamento contínuo para classificar co
 YAWN_DURATION_S: float = 1.5          # Abertura bucal contínua para diferenciar bocejo de fala
 DISTRACTION_DURATION_S: float = 2.0   # Desvio contínuo de rotação para classificar como distração
 
-# Tolerância a ruído e controle de eventos
+# Tolerância a ruído (o cooldown entre eventos fica em events/event_manager.py)
 GRACE_PERIOD_S: float = 0.15          # Tolerância a ruído ou interrupção breve de sinal
-EVENT_COOLDOWN_S: float = 5.0         # Cooldown mínimo independente entre eventos do mesmo tipo

@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import (
     DISTRACTION_DURATION_S,
-    EVENT_COOLDOWN_S,
     EYES_CLOSED_DURATION_S,
     GRACE_PERIOD_S,
     YAWN_DURATION_S,
@@ -230,62 +229,15 @@ def test_fatigue_priority_over_distraction():
     print("[OK] Teste 6: Precedencia de fadiga sobre distracao validada.")
 
 
-def test_independent_cooldown():
-    """7. Cooldown de 5.0s independente por tipo de evento."""
-    detector = DriverStateDetector()
-    normal_metrics = make_metrics(ear=0.30, yaw=0.0)
-    closed_metrics = make_metrics(ear=0.10, yaw=0.0)
-
-    # Episodio 1 de fadiga: dispara em t=1.0s
-    for i in range(21):
-        t = round(i * 0.05, 3)
-        res = detector.update(closed_metrics, now=t)
-        if t == 1.0:
-            assert res.should_record is True
-            assert res.event_type == "fadiga"
-
-    # Motorista abre os olhos em t=1.05s
-    detector.update(normal_metrics, now=1.05)
-    detector.update(normal_metrics, now=1.30)  # expira grace period
-
-    # Episodio 2 de fadiga: fecha os olhos novamente aos 2.0s e atinge 1.0s em 3.0s
-    # Como 3.0 - 1.0 = 2.0s < EVENT_COOLDOWN_S (5.0s), NAO deve disparar should_record!
-    second_recorded = False
-    for i in range(40, 61):
-        t = round(i * 0.05, 3)
-        res = detector.update(closed_metrics, now=t)
-        if res.should_record:
-            second_recorded = True
-
-    assert not second_recorded, "Nao deve disparar novo evento de fadiga antes de decorridos 5.0s de cooldown"
-
-    # Abre os olhos e aguarda passar o cooldown completo (t >= 1.0 + 5.0 = 6.0s)
-    detector.update(normal_metrics, now=3.1)
-    detector.update(normal_metrics, now=3.5)
-
-    # Episodio 3 de fadiga: fecha olhos em t=6.5s e atinge limiar em t=7.5s (passou 6.5s desde o primeiro)
-    third_recorded = False
-    for i in range(130, 151):
-        t = round(i * 0.05, 3)
-        res = detector.update(closed_metrics, now=t)
-        if res.should_record:
-            assert res.event_type == "fadiga"
-            assert t == 7.5
-            third_recorded = True
-
-    assert third_recorded, "Deve disparar novo evento de fadiga apos expirado o cooldown de 5.0s"
-    print("[OK] Teste 7: Cooldown independente de 5.0s validado.")
-
-
 def test_no_face_handling():
-    """8. Tratamento de frame sem rosto (metrics is None)."""
+    """7. Tratamento de frame sem rosto (metrics is None)."""
     detector = DriverStateDetector()
     res = detector.update(None, now=1.0)
     assert res.driver_state == "SEM_ROSTO"
     assert res.should_record is False
     assert res.event_type is None
     assert res.score == 0.0
-    print("[OK] Teste 8: Tratamento de frame sem rosto validado.")
+    print("[OK] Teste 7: Tratamento de frame sem rosto validado.")
 
 
 def run_all_tests():
@@ -299,11 +251,10 @@ def run_all_tests():
     test_sustained_yawn()
     test_distraction_head_pose()
     test_fatigue_priority_over_distraction()
-    test_independent_cooldown()
     test_no_face_handling()
 
     print("\n" + "=" * 65)
-    print("TODOS OS 8 TESTES DO DETECTOR PASSARAM COM SUCESSO!")
+    print("TODOS OS 7 TESTES DO DETECTOR PASSARAM COM SUCESSO!")
     print("=" * 65)
 
 
