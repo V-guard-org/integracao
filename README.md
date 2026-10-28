@@ -1,6 +1,7 @@
 # V-GUARD — Integração (visão + gerenciador de eventos)
 
-Junta os dois repositórios em um **único processo** na Raspberry Pi 4:
+Junta visão e gerenciador em um **processo principal** na Raspberry Pi 4.
+Quando a câmera usa outro Python, somente a captura roda em um auxiliar:
 
 | Pasta     | Origem                                       | Papel                                                        |
 |-----------|----------------------------------------------|--------------------------------------------------------------|
@@ -64,14 +65,20 @@ python3 vision/scripts/download_model.py     # baixa vision/models/face_landmark
 ```
 
 ```bash
-python3 vguard.py --headless                 # na Pi, sem janela
+python3 vguard.py --headless                 # na Pi, câmera CSI via Picamera2, sem janela
 ```
 
 ```bash
 python3 vguard.py --source video.mp4         # no notebook, com HUD (q para sair)
 ```
 
-Outras opções: `--source 0` (índice da câmera), `--width`/`--height` (padrão 640×480).
+Outras opções: `--source 0` (webcam USB), `--width`/`--height` (padrão 640×480),
+`--fps 30`, `--camera-num 0` e `--infrared`. A fonte padrão é `picamera2` (CSI).
+Se a câmera e a visão usam versões diferentes de Python, acrescente
+`--camera-python /usr/bin/python3` para capturar pelo interpretador do sistema.
+Para a câmera noturna OV5647, siga [o preparo e os testes na Raspberry Pi](docs/camera-ov5647.md).
+Os [resultados medidos na Pi 4B](docs/validacao-ov5647.md) incluem captura real
+com rosto, pouca luz e iluminação IR.
 
 ### Raspberry Pi 4B: ambiente validado e execução local
 
@@ -86,8 +93,13 @@ Com o modelo em `vision/models/face_landmarker.task`, execute:
 cd /home/vguard/vguard/integracao
 VGUARD_DATA=/home/vguard/vguard/dados-integracao \
   /home/vguard/vguard/compat/mediapipe-0.10.18-py311/.venv/bin/python -B \
-  vguard.py --headless --source 0 --no-uart --no-sync
+  vguard.py --headless --source picamera2 --no-uart --no-sync
 ```
+
+Para CSI no mesmo processo, esse interpretador precisa importar `picamera2` e `libcamera`.
+No Debian 13 com Python de sistema 3.13, use `--camera-python /usr/bin/python3`:
+a câmera roda em um auxiliar 3.13 e envia frames BGR ao pipeline MediaPipe 3.11.
+`--source 0` continua selecionando uma webcam USB.
 
 `--no-sync` não inicia a thread nem acessa o backend. `--no-uart` não inicia o leitor.
 Para uma execução limitada, acrescente `--max-frames 120`. Ctrl+C ou SIGTERM encerram
@@ -127,6 +139,7 @@ Cada arquivo de teste roda sozinho. A partir de `integracao/`:
 
 ```bash
 (cd vision && python3 test_metrics.py && python3 test_detector.py && python3 test_pipeline_integration.py)
+python3 -B vision/test_capture.py
 ```
 
 ```bash
@@ -140,10 +153,12 @@ Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`
 `events/test_uart_reader.py` precisa do ESP32 simulado em `../firmware_telemetria/host/fake_esp32.py`
 (ou `VGUARD_FIRMWARE=<pasta>`).
 
-Teste opt-in da aplicação com webcam e persistência reais, sem UART/backend:
+Teste opt-in da aplicação com câmera CSI e persistência reais, sem UART/backend,
+executado na Raspberry Pi:
 
 ```bash
-python3 -B tools/validate_camera_persistence.py --data-dir /caminho/novo-exclusivo-do-teste
+python3 -B tools/validate_camera_persistence.py --source picamera2 \
+  --data-dir /caminho/novo-exclusivo-do-teste
 ```
 
 O teste usa o ponto de entrada integrado e injeta métricas sintéticas no detector temporal.

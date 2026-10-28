@@ -8,6 +8,27 @@ import vguard
 
 
 class ApplicationLifecycle(unittest.TestCase):
+    def test_csi_options_reach_integrated_pipeline(self):
+        with patch.object(vguard, "EventManager"), \
+             patch.object(vguard, "VisionPipeline") as pipeline:
+            vguard.run(["--headless", "--no-uart", "--no-sync", "--infrared",
+                        "--camera-num", "1", "--fps", "20",
+                        "--camera-python", "/usr/bin/python3"])
+        options = pipeline.call_args.kwargs
+        self.assertEqual(options["source"], "picamera2")
+        self.assertEqual(options["camera_fps"], 20)
+        self.assertEqual(options["camera_num"], 1)
+        self.assertTrue(options["infrared"])
+        self.assertEqual(options["camera_python"], "/usr/bin/python3")
+
+    def test_invalid_camera_options_fail_before_database_creation(self):
+        for options in (["--fps", "nan"], ["--fps", "0"], ["--width", "0"],
+                        ["--camera-num", "-1"], ["--source", "0", "--infrared"]):
+            with self.subTest(options=options), patch.object(vguard, "EventManager") as manager:
+                with self.assertRaises(SystemExit):
+                    vguard.run(options)
+                manager.assert_not_called()
+
     def test_camera_only_never_constructs_uart_or_sync(self):
         manager = Mock()
         with patch.object(vguard, "EventManager", return_value=manager), \

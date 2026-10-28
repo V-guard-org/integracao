@@ -13,6 +13,7 @@ Ponto de entrada: ../vguard.py (este modulo so fornece VisionPipeline e parse_ar
 """
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ from config import (
     RIGHT_EYE_INDICES,
 )
 from detector import DetectionResult, DriverStateDetector
+from capture import Capture, open_capture
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
 
 
@@ -128,11 +130,15 @@ class VisionPipeline:
         self,
         event_manager: Any,
         headless: bool = False,
-        source: Union[int, str] = 0,
+        source: Union[int, str] = "picamera2",
         model_path: Union[str, Path] = MODEL_PATH,
         frame_width: int = FRAME_WIDTH,
         frame_height: int = FRAME_HEIGHT,
         max_frames: Optional[int] = None,
+        camera_fps: float = 30.0,
+        camera_num: int = 0,
+        infrared: bool = False,
+        camera_python: Optional[str] = None,
     ):
         self.event_manager = event_manager
         self.headless = headless
@@ -141,6 +147,10 @@ class VisionPipeline:
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.max_frames = max_frames
+        self.camera_fps = camera_fps
+        self.camera_num = camera_num
+        self.infrared = infrared
+        self.camera_python = camera_python
 
         if not self.model_path.exists():
             raise FileNotFoundError(
@@ -167,18 +177,10 @@ class VisionPipeline:
         )
         return vision.FaceLandmarker.create_from_options(options)
 
-    def _open_capture(self) -> cv2.VideoCapture:
-        """Abre a captura de video pela webcam ou arquivo."""
-        cap = cv2.VideoCapture(self.source)
-        if not cap.isOpened():
-            raise RuntimeError(f"Nao foi possivel abrir a fonte de video: {self.source}")
-
-        # Tenta definir resolucao recomendada caso seja dispositivo de camera
-        if isinstance(self.source, int):
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
-
-        return cap
+    def _open_capture(self) -> Capture:
+        """Abre a câmera CSI, webcam ou arquivo mantendo o contrato BGR."""
+        return open_capture(self.source, self.frame_width, self.frame_height,
+                            self.camera_fps, self.camera_num, self.infrared, self.camera_python)
 
     def run(self) -> int:
         """
@@ -301,11 +303,13 @@ class VisionPipeline:
                     break
 
         finally:
-            cap.release()
-            landmarker.close()
-            if not self.headless:
-                cv2.destroyAllWindows()
-            print(f"[V-GUARD Vision] Pipeline finalizado. Total de frames: {frame_count}, Eventos: {self.events_recorded_count}")
+            try:
+                cap.release()
+            finally:
+                landmarker.close()
+                if not self.headless:
+                    cv2.destroyAllWindows()
+                print(f"[V-GUARD Vision] Pipeline finalizado. Total de frames: {frame_count}, Eventos: {self.events_recorded_count}")
 
         return self.events_recorded_count
 
@@ -326,8 +330,8 @@ def parse_args(argv=None, parser=None):
     parser.add_argument(
         "--source",
         type=str,
-        default="0",
-        help="Indice da camera (ex: 0) ou caminho de arquivo de video para testes",
+        default="picamera2",
+        help="picamera2 para CSI OV5647 (padrao), indice de webcam (ex: 0) ou arquivo de video",
     )
     parser.add_argument(
         "--width",
@@ -341,4 +345,21 @@ def parse_args(argv=None, parser=None):
         default=FRAME_HEIGHT,
         help=f"Altura alvo de captura (padrao: {FRAME_HEIGHT})",
     )
-    return parser.parse_args(argv)
+    parser.add_argument("--fps", type=float, default=30.0,
+                        help="FPS solicitado à câmera (padrao: 30; nao altera videos)")
+    parser.add_argument("--camera-num", type=int, default=0,
+                        help="Indice da camera CSI listado por rpicam-hello --list-cameras")
+    parser.add_argument("--infrared", action="store_true",
+                        help="Fixa ganhos de cor para iluminacao IR na CSI; nao aciona LEDs/IR-CUT")
+    parser.add_argument("--camera-python",
+                        help="Python com Picamera2/libcamera, ex: /usr/bin/python3; captura em processo auxiliar")
+    args = parser.parse_args(argv)
+    if args.width <= 0 or args.height <= 0:
+        parser.error("--width e --height devem ser maiores que zero")
+    if not math.isfinite(args.fps) or args.fps <= 0:
+        parser.error("--fps deve ser finito e maior que zero")
+    if args.camera_num < 0:
+        parser.error("--camera-num deve ser maior ou igual a zero")
+    if args.source != "picamera2" and (args.infrared or args.camera_num != 0 or args.camera_python):
+        parser.error("--infrared, --camera-num e --camera-python exigem --source picamera2")
+    return args

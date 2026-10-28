@@ -52,6 +52,10 @@ def run(argv=None):
             frame_width=args.width,
             frame_height=args.height,
             max_frames=args.max_frames,
+            camera_fps=args.fps,
+            camera_num=args.camera_num,
+            infrared=args.infrared,
+            camera_python=args.camera_python,
         ).run()
     except KeyboardInterrupt:
         logging.info("encerramento solicitado")
