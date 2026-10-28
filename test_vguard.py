@@ -12,11 +12,13 @@ class ApplicationLifecycle(unittest.TestCase):
         manager = Mock()
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "UartReader") as uart, \
+             patch.object(vguard, "GpsReader") as gps, \
              patch.object(vguard, "Sync") as sync, \
              patch.object(vguard, "VisionPipeline") as pipeline:
             pipeline.return_value.run.return_value = 1
-            self.assertEqual(vguard.run(["--headless", "--no-uart", "--no-sync", "--max-frames", "10"]), 1)
+            self.assertEqual(vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync", "--max-frames", "10"]), 1)
             uart.assert_not_called()
+            gps.assert_not_called()
             sync.assert_not_called()
             self.assertIs(pipeline.call_args.kwargs["event_manager"], manager)
             self.assertEqual(pipeline.call_args.kwargs["max_frames"], 10)
@@ -24,24 +26,26 @@ class ApplicationLifecycle(unittest.TestCase):
 
     def test_initialization_failure_stops_workers_before_closing_database(self):
         order = []
-        manager, reader, sync = Mock(), Mock(), Mock()
+        manager, reader, gps, sync = Mock(), Mock(), Mock(), Mock()
         manager.close.side_effect = lambda: order.append("database")
         reader.stop.side_effect = lambda: order.append("uart")
+        gps.stop.side_effect = lambda: order.append("gps")
         sync.stop.side_effect = lambda: order.append("sync")
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "UartReader", return_value=reader), \
+             patch.object(vguard, "GpsReader", return_value=gps), \
              patch.object(vguard, "Sync", return_value=sync), \
              patch.object(vguard, "VisionPipeline", side_effect=RuntimeError("model unavailable")):
             with self.assertRaisesRegex(RuntimeError, "model unavailable"):
                 vguard.run(["--headless"])
-        self.assertEqual(order, ["uart", "sync", "database"])
+        self.assertEqual(order, ["uart", "gps", "sync", "database"])
 
     def test_interrupt_closes_database(self):
         manager = Mock()
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "VisionPipeline") as pipeline:
             pipeline.return_value.run.side_effect = KeyboardInterrupt
-            vguard.run(["--headless", "--no-uart", "--no-sync"])
+            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync"])
             manager.close.assert_called_once()
 
     def test_landmarker_failure_releases_camera(self):

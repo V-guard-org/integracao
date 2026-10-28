@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 
 import sync
 from event_manager import EventManager
@@ -20,7 +21,7 @@ JPEG = b"\xff\xd8\xff\xe0 foto de teste \xff\xd9"
 class Backend(http.server.BaseHTTPRequestHandler):
 
     received = []   # (caminho, corpo) do que foi confirmado
-    fault = None    # (sufixo do caminho, "drop" ou status HTTP), uma vez só
+    fault = None    # (sufixo do caminho, "drop", "slow" ou status HTTP), uma vez só
 
     def do_PUT(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
@@ -33,6 +34,18 @@ class Backend(http.server.BaseHTTPRequestHandler):
         if status == "drop":
             # Conexão cai no meio do envio, sem resposta.
             self.close_connection = True
+            return
+
+        if status == "slow":
+            # Grava, mas responde depois do tempo de espera do Sync: a
+            # confirmação se perde e o Sync precisa reenviar (T34.2).
+            Backend.received.append((self.path, body))
+            time.sleep(sync.HTTP_TIMEOUT * 2)
+            try:
+                self.send_response(200)
+                self.end_headers()
+            except OSError:
+                pass    # o Sync já desistiu e fechou a conexão
             return
 
         if status == 200:
@@ -89,6 +102,7 @@ def main():
     assert len(json.loads(received("/telemetry")[0])["items"]) == 30
     event, = [json.loads(body) for body in received("/events/" + first)]
     assert event["type"] == "fadiga" and len(event["window"]) == 201
+    assert event["has_photo"] == 1        # o dashboard mostra "foto no cartão"
     assert received("/photo") == [] and received("/events/" + bad) == []
     assert manager.pending_counts() == {
         "telemetry": 0, "events": 0, "photos": 1
@@ -130,6 +144,23 @@ def main():
     assert service.sync_once() == "wifi"
     assert received("/photo")[-1] == JPEG + b"2"
     assert manager.pending_photos() == []
+
+    # Servidor lento (T34.2): grava, mas responde depois do tempo de espera.
+    # O item continua pendente e volta no ciclo seguinte; a chave por ts no
+    # backend faz o reenvio não duplicar.
+    sync.HTTP_TIMEOUT = 0.5
+    manager.update("imu", {"ax": 0}, 1900.0)
+    Backend.fault = ("/telemetry", "slow")
+    try:
+        service.sync_once()
+        assert False, "deveria ter falhado"
+    except TimeoutError:
+        pass
+    assert manager.pending_counts()["telemetry"] == 1
+    assert service.sync_once() == "wifi"
+    assert manager.pending_counts()["telemetry"] == 0
+    slow, resent = [json.loads(b)["items"] for b in received("/telemetry")[-2:]]
+    assert slow == resent     # o mesmo lote, inteiro
 
     # Backend respondendo 500: o dado novo continua pendente.
     manager.update("imu", {"ax": 0}, 2000.0)

@@ -62,7 +62,7 @@ def main():
     started = time.perf_counter()
     with patch.dict(os.environ, {"VGUARD_DATA": str(data)}), \
          patch.object(DriverStateDetector, "update", controlled_update):
-        count = vguard.run(["--headless", "--source", "0", "--no-uart", "--no-sync",
+        count = vguard.run(["--headless", "--source", "0", "--no-uart", "--no-gps", "--no-sync",
                             "--max-frames", str(args.frames)])
     elapsed = time.perf_counter() - started
     assert frames == args.frames, (frames, args.frames)

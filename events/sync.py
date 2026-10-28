@@ -34,7 +34,7 @@ from event_manager import CONFIRMED, FAILED
 #
 #   POST /health               JSON
 #   POST /telemetry            JSON {"items": [{id, ts, data}, ...]}
-#   PUT  /events/<id>          JSON {id, type, ts, score, data, window}
+#   PUT  /events/<id>          JSON {id, type, ts, score, data, has_photo, window}
 #   PUT  /events/<id>/photo    image/jpeg
 #
 # Os PUT levam o id do evento na URL: reenviar não duplica (RNF26).
