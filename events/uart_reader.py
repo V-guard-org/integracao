@@ -49,16 +49,17 @@ REOPEN_S = 2.0
 OBD_MAX_AGE_MS = 3000
 
 
-def open_port(path):
+def open_port(path, baud=termios.B460800):
     """
-    Abre a UART a 460800 baud, 8N1, sem controle de fluxo (PROTOCOLO.md).
+    Abre a UART em 8N1, sem controle de fluxo. O padrão de 460800 baud é
+    o do ESP32 (PROTOCOLO.md); o GPS passa a dele.
     """
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
     tty.setraw(fd)
     attrs = termios.tcgetattr(fd)
     attrs[2] |= termios.CLOCAL | termios.CREAD
     attrs[2] &= ~(termios.CSTOPB | termios.CRTSCTS)
-    attrs[4] = attrs[5] = termios.B460800
+    attrs[4] = attrs[5] = baud
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
     return fd
 
@@ -80,9 +81,10 @@ def drop_stale(sample, max_age_ms=OBD_MAX_AGE_MS):
 
 class UartReader:
 
-    def __init__(self, manager, port=PORT):
+    def __init__(self, manager, port=PORT, baud=termios.B460800):
         self.manager = manager
         self.port = port
+        self.baud = baud
         self.decoder = Decoder()
         self._stop = threading.Event()
         self._thread = None
@@ -119,7 +121,7 @@ class UartReader:
             self._stop.wait(REOPEN_S)
 
     def _read(self):
-        fd = open_port(self.port)
+        fd = open_port(self.port, self.baud)
         try:
             while not self._stop.is_set():
                 ready, _, _ = select.select([fd], [], [], POLL_S)

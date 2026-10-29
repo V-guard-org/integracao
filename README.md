@@ -21,7 +21,8 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
               ▼
         manager.record_event(type, score, jpeg, ts) ──► EventManager ──► SD (dados/)
                                                           ▲      │
- ESP32 ──UART──► UartReader ──manager.update("imu"|"obd")─┘      │
+ ESP32 ──UART──► UartReader ──manager.update("imu"|"obd")─┤      │
+ GNSS ───NMEA──► GpsReader ───manager.update("gps")───────┘      │
                                                                  ▼
                                           Sync ◄── pending_* / ack_* ──► backend
 ```
@@ -33,7 +34,9 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
 3. **EventManager** anexa a última amostra de cada sensor, grava a foto e a linha no SQLite
    e guarda a janela de telemetria de 10 s antes e 10 s depois do evento (RF17).
 4. **UartReader** (thread) decodifica o protocolo do ESP32 e alimenta `manager.update()` com IMU e OBD-II.
-5. **Sync** (thread) envia a cada 60 s o que está pendente: metadados e telemetria por 4G ou Wi-Fi,
+5. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
+   em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
+6. **Sync** (thread) envia a cada 60 s o que está pendente: metadados e telemetria por 4G ou Wi-Fi,
    fotos **só** por Wi-Fi autorizado. Um item só é marcado como enviado depois do 2xx do backend (RF22).
 
 ### O contrato entre os dois lados
@@ -106,8 +109,8 @@ Para uma execução limitada, acrescente `--max-frames 120`. Ctrl+C ou SIGTERM e
 os componentes antes de fechar o banco. A sincronização aguarda sua thread terminar;
 se houver envio em andamento, o encerramento pode esperar o timeout da conexão.
 
-Sem o ESP32 conectado, o `UartReader` só registra um aviso a cada 2 s e tenta de novo.
-A visão e a gravação de eventos continuam funcionando.
+Sem o ESP32 ou o GPS conectados, o leitor correspondente só registra um aviso a cada 2 s e
+tenta de novo. A visão e a gravação de eventos continuam funcionando.
 
 ### Variáveis de ambiente
 
@@ -115,6 +118,8 @@ A visão e a gravação de eventos continuam funcionando.
 |------------------|------------------------------|--------------------------------------|
 | `VGUARD_DATA`    | `dados`                      | Pasta no cartão SD                    |
 | `VGUARD_UART`    | `/dev/ttyAMA5`               | UART ligada ao ESP32                  |
+| `VGUARD_GPS`     | `/dev/serial0`               | UART ligada ao receptor GNSS          |
+| `VGUARD_GPS_BAUD`| `9600`                       | Velocidade da UART do GNSS            |
 | `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend                        |
 | `VGUARD_DEVICE`  | `vguard-01`                  | Identificador do dispositivo          |
 | `VGUARD_TOKEN`   | vazio                        | Token de autenticação no backend      |
@@ -143,7 +148,7 @@ python3 -B vision/test_capture.py
 ```
 
 ```bash
-(cd events && python3 test_event_manager.py && python3 test_sync.py)
+(cd events && python3 test_event_manager.py && python3 test_sync.py && python3 test_uart_reader.py && python3 test_gps_reader.py)
 python3 -B test_vguard.py
 ```
 
@@ -151,7 +156,8 @@ Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`
 
 `test_pipeline_integration.py` usa um mock do `EventManager` com a mesma assinatura do real.
 `events/test_uart_reader.py` precisa do ESP32 simulado em `../firmware_telemetria/host/fake_esp32.py`
-(ou `VGUARD_FIRMWARE=<pasta>`).
+(ou `VGUARD_FIRMWARE=<pasta>`). `events/test_gps_reader.py` usa um receptor falso num pty.
+Os testes de `events/` precisam de Linux (na Pi ou no WSL).
 
 Teste opt-in da aplicação com câmera CSI e persistência reais, sem UART/backend,
 executado na Raspberry Pi:
@@ -168,7 +174,9 @@ esses eventos com registros reais. Na Pi, use o interpretador 3.11 validado acim
 
 ## Pendências
 
-- **GPS (RF02):** nada chama `manager.update("gps", ...)` ainda, então os eventos saem sem posição.
-  Falta um leitor do GPS no mesmo formato do `UartReader`.
+- **GPS (RF02):** o `GpsReader` está testado com um receptor falso. Falta conferir com o módulo
+  real a porta, a velocidade (`VGUARD_GPS`, `VGUARD_GPS_BAUD`) e se ele envia RMC. O PPS e o
+  acerto do relógio da Pi (gpsd/chrony) ficam fora do leitor; se o gpsd ocupar a porta, o leitor
+  passa a ler do gpsd.
 - **Responsabilidade:** adaptações para execução conjunta são mantidas neste repositório;
   não há sincronização automática com `visao` ou `gerenciador_eventos`. Os originais são preservados.

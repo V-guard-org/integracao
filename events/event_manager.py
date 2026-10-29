@@ -293,8 +293,9 @@ class EventManager:
         with self._lock:
             self._close_windows(float("-inf"))
 
+        # has_photo: o dashboard mostra "foto no cartão" enquanto ela espera o Wi-Fi
         return self._query(
-            "SELECT id, type, ts, score, data FROM events"
+            "SELECT id, type, ts, score, data, photo IS NOT NULL AS has_photo FROM events"
             " WHERE meta_synced = 0 AND window_closed = 1 ORDER BY ts LIMIT ?",
             (limit,)
         )
