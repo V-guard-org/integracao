@@ -35,8 +35,8 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
 4. **UartReader** (thread) decodifica o protocolo do ESP32 e alimenta `manager.update()` com IMU e OBD-II.
 5. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
    em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
-6. **Sync** (thread) envia a cada 60 s o que está pendente: metadados e telemetria por 4G ou Wi-Fi,
-   fotos **só** por Wi-Fi autorizado. Um item só é marcado como enviado depois do 2xx do backend (RF22).
+6. **Sync** (thread) envia a cada 60 s o que está pendente: metadados, telemetria e fotos por 4G ou Wi-Fi
+   (as fotos vão por último e, se falharem, atrasam só a si mesmas). Um item só é marcado como enviado depois do 2xx do backend (RF22).
 
 ### O contrato entre os dois lados
 

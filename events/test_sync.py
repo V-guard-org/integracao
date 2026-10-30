@@ -93,7 +93,7 @@ def main():
         "telemetry": 30, "events": 2, "photos": 2
     }
 
-    # 4G: saúde, telemetria e metadados (com janela); nenhuma foto.
+    # 4G: saúde, telemetria, metadados (com janela) e a foto do evento aceito.
     # O backend recusa um dos eventos (422): vira FAILED e sai da fila.
     link[0] = "cellular"
     Backend.fault = ("/events/" + bad, 422)
@@ -102,10 +102,11 @@ def main():
     assert len(json.loads(received("/telemetry")[0])["items"]) == 30
     event, = [json.loads(body) for body in received("/events/" + first)]
     assert event["type"] == "fadiga" and len(event["window"]) == 201
-    assert event["has_photo"] == 1        # o dashboard mostra "foto no cartão"
-    assert received("/photo") == [] and received("/events/" + bad) == []
+    assert event["has_photo"] == 1        # a foto existe na Pi
+    assert received("/events/" + bad) == []
+    assert received("/photo") == [JPEG]   # a foto sobe pelo 4G, logo depois dos dados
     assert manager.pending_counts() == {
-        "telemetry": 0, "events": 0, "photos": 1
+        "telemetry": 0, "events": 0, "photos": 0
     }
     assert service.last_contact is not None
 
@@ -113,27 +114,27 @@ def main():
     # as pendências depois do envio.
     first_health, last_health = [json.loads(body) for body in received("/health")]
     assert first_health["pending"] == {"telemetry": 30, "events": 2, "photos": 2}
-    assert last_health["pending"] == {"telemetry": 0, "events": 0, "photos": 1}
+    assert last_health["pending"] == {"telemetry": 0, "events": 0, "photos": 0}
 
     # Nada é reenviado no ciclo seguinte, nem o evento recusado.
     count = len(Backend.received)
     service.sync_once()
     assert len(Backend.received) == count + 1   # só a saúde
 
-    # Wi-Fi com upload interrompido: a foto continua pendente...
-    link[0] = "wifi"
+    # Upload da foto interrompido (4G fraco): a foto fica pendente, mas o ciclo
+    # termina normalmente e os dados do mesmo ciclo já foram confirmados.
+    late = manager.record_event("fadiga", 0.9, JPEG + b"3", 1300.0)
+    manager.update("imu", {"ax": 0}, 1320.0)     # fecha a janela
     Backend.fault = ("/photo", "drop")
-    try:
-        service.sync_once()
-        assert False, "deveria ter falhado"
-    except OSError:
-        pass
-    assert received("/photo") == []
-    assert [i for i, _ in manager.pending_photos()] == [first]
-
-    # ...e é reenviada inteira no ciclo seguinte.
-    assert service.sync_once() == "wifi"
+    assert service.sync_once() == "cellular"     # não levanta: foto atrasa, dado não
+    assert len(received("/events/" + late)) == 1
     assert received("/photo") == [JPEG]
+    assert [i for i, _ in manager.pending_photos()] == [late]
+
+    # ...e é reenviada inteira no ciclo seguinte, agora pelo Wi-Fi.
+    link[0] = "wifi"
+    assert service.sync_once() == "wifi"
+    assert received("/photo") == [JPEG, JPEG + b"3"]
     assert manager.pending_photos() == []
 
     # Foto apagada do cartão à mão: sai da fila e não trava as seguintes.

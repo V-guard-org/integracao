@@ -5,8 +5,11 @@ Envia o que o EventManager tem pendente e só marca como confirmado o
 que o backend respondeu com 2xx (RF22):
 
     Wi-Fi autorizado   saúde + telemetria + eventos + fotografias
-    4G                 saúde + telemetria + eventos (sem fotografias)
+    4G                 saúde + telemetria + eventos + fotografias
     sem enlace         nada; tudo continua pendente no SD
+
+As fotografias vão por último e podem atrasar: se o envio de uma falha (4G
+fraco), ela fica pendente para o próximo ciclo e não adia os dados.
 
 Roda em uma thread do mesmo processo do EventManager:
 
@@ -43,7 +46,7 @@ BACKEND_URL = os.environ.get("VGUARD_BACKEND", "https://vguard.example/api")
 DEVICE_ID = os.environ.get("VGUARD_DEVICE", "vguard-01")
 DEVICE_TOKEN = os.environ.get("VGUARD_TOKEN", "")
 
-# Nomes das conexões Wi-Fi do NetworkManager autorizadas a levar fotos.
+# Nomes das conexões Wi-Fi do NetworkManager autorizadas a levar dados.
 AUTHORIZED_WIFI = []
 
 # Interfaces do módulo 4G quando ele aparece como placa de rede USB.
@@ -185,38 +188,41 @@ class Sync:
                 manager.ack_telemetry([item["id"] for item in batch], state)
 
             # a janela vai junto com os metadados, inclusive no 4G
-            # (~150 kB por evento com IMU a 100 Hz). Se pesar na franquia,
-            # dar a ela um estado próprio e mandar só por Wi-Fi.
+            # (~150 kB por evento com IMU a 100 Hz).
             for event in manager.pending_events():
                 event["window"] = manager.window(event["id"])
                 state = send("PUT", "/events/" + event["id"], event)
                 manager.ack_event(event["id"], state)
 
-            for event_id, path in manager.pending_photos():
-                # reconfere o enlace a cada foto, mas se o Wi-Fi cair
-                # entre a conferência e o envio, essa foto pode sair pelo 4G.
-                # Para garantia total, prender o socket à wlan0 (SO_BINDTODEVICE).
-                if self.link() != "wifi":
-                    break
+            # Foto atrasa, mas não atrasa os dados: se o envio falha (4G fraco,
+            # backend ainda sem o evento), ela fica pendente para o próximo ciclo e
+            # este termina normalmente. Um erro aqui subir para run() dobraria o
+            # intervalo e adiaria a telemetria e os eventos.
+            photo_failed = False
+            try:
+                for event_id, path in manager.pending_photos():
+                    try:
+                        with open(path, "rb") as f:
+                            jpeg = f.read()
+                    except FileNotFoundError:
+                        # Apagada do cartão à mão: nunca vai subir. Sem isto, a
+                        # primeira foto ausente travaria a fila de fotos para sempre.
+                        logging.warning("foto do evento %s não existe mais no cartão", event_id)
+                        manager.ack_photo(event_id, FAILED)
+                        continue
 
-                try:
-                    with open(path, "rb") as f:
-                        jpeg = f.read()
-                except FileNotFoundError:
-                    # Apagada do cartão à mão: nunca vai subir. Sem isto, a
-                    # primeira foto ausente travaria a fila de fotos para sempre.
-                    logging.warning("foto do evento %s não existe mais no cartão", event_id)
-                    manager.ack_photo(event_id, FAILED)
-                    continue
-
-                state = send(
-                    "PUT", "/events/" + event_id + "/photo", jpeg, "image/jpeg"
-                )
-                manager.ack_photo(event_id, state)
+                    state = send(
+                        "PUT", "/events/" + event_id + "/photo", jpeg, "image/jpeg"
+                    )
+                    manager.ack_photo(event_id, state)
+            except (OSError, http.client.HTTPException, Retry) as error:
+                logging.warning("foto atrasada, tenta no próximo ciclo (%s)", error)
+                photo_failed = True
 
             # De novo no fim, se a fila mudou: senão o dashboard mostraria
             # as pendências de antes do envio até o próximo ciclo.
-            if manager.pending_counts() != before:
+            # (a conexão pode ter caído com a foto: a saúde segue no próximo ciclo)
+            if not photo_failed and manager.pending_counts() != before:
                 send("POST", "/health", self.health(link))
 
         finally:
