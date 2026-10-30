@@ -41,7 +41,7 @@ from config import (
     RIGHT_EYE_INDICES,
 )
 from detector import DetectionResult, DriverStateDetector
-from capture import Capture, open_capture
+from capture import Capture, is_webcam, open_capture
 from calibration import CalibrationSession
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
 
@@ -217,6 +217,10 @@ class VisionPipeline:
             while True:
                 ret, frame = cap.read()
                 if not ret:
+                    if is_webcam(self.source):
+                        # Webcam não tem "fim": cabo solto ou câmera travada é erro,
+                        # para o processo sair com falha e ser reiniciado.
+                        raise RuntimeError(f"A webcam {self.source} parou de enviar quadros")
                     print("[V-GUARD Vision] Fim da transmissao de video ou erro de captura.")
                     break
 
@@ -367,8 +371,9 @@ def parse_args(argv=None, parser=None):
     parser.add_argument(
         "--source",
         type=str,
-        default="picamera2",
-        help="picamera2 para CSI OV5647 (padrao), indice de webcam (ex: 0) ou arquivo de video",
+        default="0",
+        help="Indice da webcam Logitech C525 (padrao: 0), dispositivo /dev/v4l/by-id/..., "
+             "picamera2 para CSI ou arquivo de video",
     )
     parser.add_argument(
         "--width",

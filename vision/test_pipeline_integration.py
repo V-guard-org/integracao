@@ -204,6 +204,7 @@ def run_all_tests():
     test_vision_pipeline_end_to_end()
     test_csi_frame_to_event()
     test_calibration_blocks_events_and_loaded_pose_reaches_detector()
+    test_webcam_failure_is_error_but_video_end_is_not()
 
     print("\n" + "=" * 65)
     print("TODOS OS TESTES DE INTEGRAÇÃO PASSARAM COM SUCESSO!")
@@ -248,6 +249,22 @@ def test_calibration_blocks_events_and_loaded_pose_reaches_detector():
             except ValueError:
                 pass
             capture.assert_not_called()
+
+
+def test_webcam_failure_is_error_but_video_end_is_not():
+    """C525 desconectada sai com erro (para ser reiniciada); vídeo que acaba sai normal."""
+    camera = Mock()
+    camera.read.return_value = (False, None)
+    for source, should_fail in ((0, True), ("/dev/v4l/by-id/usb-046d_C525-video-index0", True),
+                                ("viagem.mp4", False)):
+        pipeline = VisionPipeline(MockEventManager(), headless=True, source=source)
+        with patch.object(pipeline, '_open_capture', return_value=camera), \
+             patch.object(pipeline, '_init_landmarker', return_value=Mock()):
+            try:
+                pipeline.run()
+                assert not should_fail, f"{source}: falha da webcam deveria virar erro"
+            except RuntimeError as error:
+                assert should_fail and "parou de enviar quadros" in str(error), error
 
 
 if __name__ == "__main__":

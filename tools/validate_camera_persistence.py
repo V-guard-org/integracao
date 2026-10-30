@@ -30,7 +30,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True, help="Diretório novo exclusivo deste teste")
     parser.add_argument("--frames", type=int, default=120)
-    parser.add_argument("--source", default="picamera2", help="picamera2 (CSI) ou índice da webcam")
+    parser.add_argument("--source", default="0", help="índice da webcam C525 (padrão: 0) ou picamera2 (CSI)")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--camera-num", type=int, default=0)
     parser.add_argument("--infrared", action="store_true")

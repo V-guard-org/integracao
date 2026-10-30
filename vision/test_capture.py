@@ -107,6 +107,14 @@ class OpenCvCaptureTests(unittest.TestCase):
         cap.set.assert_any_call(self.cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set.assert_any_call(self.cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set.assert_any_call(self.cv2.CAP_PROP_FPS, 15)
+        # C525: V4L2 direto no Linux e 1 buffer, para ler sempre o quadro mais novo.
+        cap.set.assert_any_call(self.cv2.CAP_PROP_BUFFERSIZE, 1)
+        if sys.platform.startswith("linux"):
+            self.cv2.VideoCapture.assert_called_once_with(0, self.cv2.CAP_V4L2)
+
+    def test_v4l2_device_path_is_a_webcam(self):
+        cap = open_capture("/dev/v4l/by-id/usb-046d_C525-video-index0", 640, 480)
+        cap.set.assert_any_call(self.cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def test_failed_open_releases_capture(self):
         self.cv2.VideoCapture.return_value.isOpened.return_value = False
