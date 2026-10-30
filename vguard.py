@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, "events"), os.path.join(HERE, "vision")]
@@ -37,6 +38,8 @@ def run(argv=None):
     args = parse_args(argv, parser=parser)
     if args.max_frames is not None and args.max_frames <= 0:
         parser.error("--max-frames deve ser maior que zero")
+    if args.calibrate and args.calibration_file is None:
+        args.calibration_file = Path(os.environ.get("VGUARD_DATA", "dados")) / "calibration-driver.json"
     manager = EventManager(os.environ.get("VGUARD_DATA", "dados"))
     reader = None
     gps = None
@@ -63,6 +66,8 @@ def run(argv=None):
             camera_num=args.camera_num,
             infrared=args.infrared,
             camera_python=args.camera_python,
+            calibration_path=args.calibration_file,
+            calibrate=args.calibrate,
         ).run()
     except KeyboardInterrupt:
         logging.info("encerramento solicitado")

@@ -126,7 +126,7 @@ python3 -B tools/validate_camera_persistence.py --source picamera2 \
   --frames 120 --data-dir /tmp/vguard-ov5647-persistencia-dia
 ```
 
-Esse segundo teste injeta métricas sintéticas de olhos fechados no detector para
+Esse segundo teste injeta métricas sintéticas de bocejo no detector para
 provocar exatamente um evento identificado como `teste_integracao_sintetico_fadiga`.
 A câmera, o MediaPipe, o JPEG e a persistência são reais. O teste confere o JPEG,
 integridade do SQLite e estados de sincronização e salva `result.json` com FPS,
@@ -164,6 +164,9 @@ nem garantia de acurácia noturna nesta adaptação.
 Para acompanhar o HUD na tela conectada à Pi, retire `--headless`. Para uma câmera
 CSI diferente use `--camera-num` conforme a lista de sensores. Webcam USB continua
 disponível com `--source 0`; vídeo com `--source arquivo.mp4`.
+
+Para corrigir a referência de direção na montagem lateral e medir os olhos opcionais,
+siga a [calibração guiada na interface da Pi](calibracao-motorista.md).
 
 ## Referências
 

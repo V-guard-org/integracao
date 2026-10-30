@@ -13,6 +13,7 @@ Ponto de entrada: ../vguard.py (este modulo so fornece VisionPipeline e parse_ar
 """
 
 import argparse
+from dataclasses import replace
 import math
 import sys
 import time
@@ -41,6 +42,7 @@ from config import (
 )
 from detector import DetectionResult, DriverStateDetector
 from capture import Capture, open_capture
+from calibration import CalibrationSession
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
 
 
@@ -77,11 +79,11 @@ def draw_hud(
     # Cores de estado
     state_colors = {
         "NORMAL": (0, 255, 0),       # Verde
-        "PISCANDO": (255, 255, 0),    # Ciano
         "BOCEJANDO": (0, 255, 255),   # Amarelo
         "FADIGA": (0, 0, 255),        # Vermelho
         "DISTRAIDO": (0, 0, 255),     # Vermelho
         "SEM_ROSTO": (0, 140, 255),   # Laranja
+        "CALIBRANDO": (0, 255, 255),
     }
     state_color = state_colors.get(detection.driver_state, (255, 255, 255))
 
@@ -99,7 +101,7 @@ def draw_hud(
     lines = [
         (f"Estado: {detection.driver_state}", 0.65, state_color, 2, 25),
         *face_lines,
-        (f"T. Olhos Fechados: {detection.eyes_closed_duration:.2f}s", 0.42, dim, 1, 18),
+        (f"T. Sinal ocular: {detection.eyes_closed_duration:.2f}s", 0.42, dim, 1, 18),
         (f"T. Bocejo: {detection.yawn_duration:.2f}s", 0.42, dim, 1, 18),
         (f"T. Distracao: {detection.distraction_duration:.2f}s", 0.42, dim, 1, 22),
         (f"FPS: {fps:.1f}", 0.5, (0, 255, 128), 1, 0),
@@ -139,6 +141,8 @@ class VisionPipeline:
         camera_num: int = 0,
         infrared: bool = False,
         camera_python: Optional[str] = None,
+        calibration_path: Optional[Union[str, Path]] = None,
+        calibrate: bool = False,
     ):
         self.event_manager = event_manager
         self.headless = headless
@@ -151,6 +155,10 @@ class VisionPipeline:
         self.camera_num = camera_num
         self.infrared = infrared
         self.camera_python = camera_python
+        context = f"source={source};camera={camera_num};infrared={infrared}"
+        self.calibration = CalibrationSession(calibration_path, recalibrate=calibrate, context=context)
+        if headless and self.calibration.active:
+            raise ValueError("Calibracao pendente: execute sem --headless e siga C/F/S no HUD")
 
         if not self.model_path.exists():
             raise FileNotFoundError(
@@ -239,8 +247,16 @@ class VisionPipeline:
                     landmarks = result.face_landmarks[0]
                     frame_metrics = extract_all_metrics(landmarks, w, h)
 
+                raw_metrics = frame_metrics
+                was_calibrating = self.calibration.active
+                frame_metrics = self.calibration.update(frame_metrics, now_mono, w, h)
                 # Processamento temporal e avaliacao de estado do motorista
+                if was_calibrating:
+                    self.detector.reset()
                 detection = self.detector.update(frame_metrics, now_mono)
+                if was_calibrating:
+                    detection = replace(detection, driver_state="CALIBRANDO", should_record=False,
+                                        event_type=None, score=0.0)
 
                 # Disparo de evento sob demanda (exclusivamente quando should_record for True)
                 # Otimizacao Raspberry Pi: codifica o frame puro antes dos overlays, sem frame.copy() continuo
@@ -291,12 +307,33 @@ class VisionPipeline:
                     if now_mono > alert_banner_expire:
                         alert_banner = None
 
-                    draw_hud(frame, frame_metrics, detection, fps, alert_banner)
+                    draw_hud(frame, raw_metrics if was_calibrating else frame_metrics,
+                             detection, fps, None if was_calibrating else alert_banner)
+                    cv2.rectangle(frame, (0, h - 112), (w, h - 42), (25, 25, 25), -1)
+                    cv2.putText(frame, self.calibration.message, (8, h - 94),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+                    if raw_metrics is not None:
+                        raw_text = (f"Bruto EAR L:{raw_metrics.ear_left:.3f} R:{raw_metrics.ear_right:.3f} "
+                                    f"P:{raw_metrics.pitch:+.1f} Y:{raw_metrics.yaw:+.1f}")
+                        cv2.putText(frame, raw_text, (8, h - 74),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
+                    ocular = "indeterminado"
+                    if frame_metrics and frame_metrics.eye_closure is not None:
+                        ocular = "baixo" if frame_metrics.eye_closure else "aberto"
+                    reference = "relativa" if self.calibration.profile else "sem referencia"
+                    status_text = f"Pose {reference} | Olhos: {ocular} | Reforco: {'sim' if detection.eye_support else 'nao'}"
+                    cv2.putText(frame, status_text, (8, h - 54),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
 
                     cv2.imshow("V-GUARD - Visao Computacional", frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
                         print("[V-GUARD Vision] Encerramento solicitado pelo usuario ('q').")
                         break
+                    self.calibration.key(key, time.monotonic())
+                    if self.calibration.active:
+                        self.detector.reset()
+                        alert_banner = None
 
                 # Parada opcional por limite de frames (usado em testes automatizados)
                 if self.max_frames is not None and frame_count >= self.max_frames:
@@ -353,6 +390,10 @@ def parse_args(argv=None, parser=None):
                         help="Fixa ganhos de cor para iluminacao IR na CSI; nao aciona LEDs/IR-CUT")
     parser.add_argument("--camera-python",
                         help="Python com Picamera2/libcamera, ex: /usr/bin/python3; captura em processo auxiliar")
+    parser.add_argument("--calibration-file", type=Path,
+                        help="Perfil JSON do motorista e montagem; se faltar, guia C/F/S no HUD")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="Refaz referencia de direcao e olhos opcionais pelo HUD (C/F/S)")
     args = parser.parse_args(argv)
     if args.width <= 0 or args.height <= 0:
         parser.error("--width e --height devem ser maiores que zero")
@@ -362,4 +403,6 @@ def parse_args(argv=None, parser=None):
         parser.error("--camera-num deve ser maior ou igual a zero")
     if args.source != "picamera2" and (args.infrared or args.camera_num != 0 or args.camera_python):
         parser.error("--infrared, --camera-num e --camera-python exigem --source picamera2")
+    if args.headless and args.calibrate:
+        parser.error("--calibrate exige interface grafica; retire --headless")
     return args

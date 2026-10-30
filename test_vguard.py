@@ -1,6 +1,7 @@
 """Contratos de inicialização e encerramento; executar com python -B test_vguard.py."""
 
 import threading
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -8,10 +9,17 @@ import vguard
 
 
 class ApplicationLifecycle(unittest.TestCase):
+    def test_calibration_options_reach_pipeline(self):
+        with patch.object(vguard, "EventManager"), patch.object(vguard, "VisionPipeline") as pipeline:
+            vguard.run(["--no-uart", "--no-gps", "--no-sync", "--calibrate",
+                        "--calibration-file", "/tmp/calibration-driver.json"])
+        self.assertTrue(pipeline.call_args.kwargs['calibrate'])
+        self.assertEqual(pipeline.call_args.kwargs['calibration_path'], Path('/tmp/calibration-driver.json'))
+
     def test_csi_options_reach_integrated_pipeline(self):
         with patch.object(vguard, "EventManager"), \
              patch.object(vguard, "VisionPipeline") as pipeline:
-            vguard.run(["--headless", "--no-uart", "--no-sync", "--infrared",
+            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync", "--infrared",
                         "--camera-num", "1", "--fps", "20",
                         "--camera-python", "/usr/bin/python3"])
         options = pipeline.call_args.kwargs
@@ -23,7 +31,8 @@ class ApplicationLifecycle(unittest.TestCase):
 
     def test_invalid_camera_options_fail_before_database_creation(self):
         for options in (["--fps", "nan"], ["--fps", "0"], ["--width", "0"],
-                        ["--camera-num", "-1"], ["--source", "0", "--infrared"]):
+                        ["--camera-num", "-1"], ["--source", "0", "--infrared"],
+                        ["--headless", "--calibrate"]):
             with self.subTest(options=options), patch.object(vguard, "EventManager") as manager:
                 with self.assertRaises(SystemExit):
                     vguard.run(options)

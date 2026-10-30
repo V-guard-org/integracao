@@ -28,8 +28,7 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
 ```
 
 1. **Visão** (thread principal; o `cv2.imshow` exige isso) lê um frame, extrai as métricas e passa ao
-   `DriverStateDetector`. Quando uma condição dura o suficiente (olhos fechados ≥ 1 s,
-   bocejo ≥ 1,5 s, cabeça desviada ≥ 2 s), o detector devolve `should_record=True` **uma vez por episódio**.
+   `DriverStateDetector`. Quando uma condição dura o suficiente (bocejo ≥ 1,5 s ou cabeça desviada ≥ 2 s), o detector devolve `should_record=True` **uma vez por episódio**.
 2. Nesse frame, a visão codifica a imagem **sem overlays** em JPEG e chama `record_event`.
 3. **EventManager** anexa a última amostra de cada sensor, grava a foto e a linha no SQLite
    e guarda a janela de telemetria de 10 s antes e 10 s depois do evento (RF17).
@@ -80,6 +79,9 @@ Outras opções: `--source 0` (webcam USB), `--width`/`--height` (padrão 640×4
 Se a câmera e a visão usam versões diferentes de Python, acrescente
 `--camera-python /usr/bin/python3` para capturar pelo interpretador do sistema.
 Para a câmera noturna OV5647, siga [o preparo e os testes na Raspberry Pi](docs/camera-ov5647.md).
+Para montagem lateral junto ao retrovisor, use a [calibração guiada do motorista](docs/calibracao-motorista.md).
+Olhos são um sinal auxiliar da distração e não disparam fadiga isoladamente.
+
 Os [resultados medidos na Pi 4B](docs/validacao-ov5647.md) incluem captura real
 com rosto, pouca luz e iluminação IR.
 
@@ -145,6 +147,7 @@ Cada arquivo de teste roda sozinho. A partir de `integracao/`:
 ```bash
 (cd vision && python3 test_metrics.py && python3 test_detector.py && python3 test_pipeline_integration.py)
 python3 -B vision/test_capture.py
+python3 -B vision/test_calibration.py
 ```
 
 ```bash

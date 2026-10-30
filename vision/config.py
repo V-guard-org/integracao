@@ -88,13 +88,13 @@ FACE_3D_MODEL = np.array(
 # ==============================================================================
 
 # Limiares geométricos de referência
-EAR_THRESHOLD: float = 0.22       # Limiar abaixo do qual os olhos sao considerados fechados
+EAR_THRESHOLD: float = 0.22       # Referência histórica; decisão ocular usa o perfil individual
 MAR_THRESHOLD: float = 0.60       # Limiar acima do qual a boca e considerada aberta (bocejo)
 YAW_THRESHOLD: float = 25.0       # Graus de rotação horizontal para caracterizar distração
 PITCH_THRESHOLD: float = 20.0     # Graus de rotação vertical para caracterizar cabeça baixa/adormecimento
 
 # Limiares temporais em segundos
-EYES_CLOSED_DURATION_S: float = 1.0   # Fechamento contínuo para classificar como sonolência/microssono
+EYES_CLOSED_DURATION_S: float = 1.0   # Evidência ocular auxiliar; não dispara fadiga isoladamente
 YAWN_DURATION_S: float = 1.5          # Abertura bucal contínua para diferenciar bocejo de fala
 DISTRACTION_DURATION_S: float = 2.0   # Desvio contínuo de rotação para classificar como distração
 

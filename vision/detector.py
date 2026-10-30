@@ -30,11 +30,11 @@ from metrics import FrameMetrics
 class DetectionResult:
     """
     Resultado imutavel da avaliacao temporal do estado do condutor:
-    - driver_state: Estado visual atual ("NORMAL", "PISCANDO", "BOCEJANDO", "FADIGA", "DISTRAIDO", "SEM_ROSTO")
+    - driver_state: Estado visual atual (NORMAL, BOCEJANDO, FADIGA, DISTRAIDO, SEM_ROSTO)
     - should_record: True exclusivamente no frame exato em que o evento deve ser persistido
     - event_type: "fadiga" ou "distracao" quando should_record=True, ou None caso contrario
     - score: Severidade continua entre 0.0 e 1.0 (iniciando em 0.70 ao cruzar o limiar)
-    - eyes_closed_duration: Tempo acumulado com olhos fechados (segundos)
+    - eyes_closed_duration: Tempo de sinal ocular baixo validado pela calibração (segundos)
     - yawn_duration: Tempo acumulado com abertura bucal de bocejo (segundos)
     - distraction_duration: Tempo acumulado de desvio de cabeca (segundos)
     """
@@ -45,6 +45,7 @@ class DetectionResult:
     eyes_closed_duration: float
     yawn_duration: float
     distraction_duration: float
+    eye_support: bool = False
 
 
 # ==============================================================================
@@ -64,6 +65,8 @@ class TemporalConditionTracker:
         self.last_active_time: Optional[float] = None
         self.duration: float = 0.0
         self.episode_triggered: bool = False
+        self.last_update_time: Optional[float] = None
+        self.previously_active = False
 
     def update(self, is_active: bool, now: float) -> float:
         """
@@ -74,10 +77,11 @@ class TemporalConditionTracker:
             if self.start_time is None:
                 # Inicio de nova acumulacao
                 self.start_time = now
-            elif (
-                self.last_active_time is not None
-                and (now - self.last_active_time) > self.grace_period_s
-            ):
+            elif (self.last_update_time is not None and (
+                now - self.last_update_time > 0.5
+                or (not self.previously_active and self.last_active_time is not None
+                    and now - self.last_active_time > self.grace_period_s)
+            )):
                 # Interrupcao anterior ultrapassou a tolerancia: reinicia o episodio
                 self.start_time = now
                 self.episode_triggered = False
@@ -102,7 +106,14 @@ class TemporalConditionTracker:
             else:
                 self.duration = 0.0
 
+        self.last_update_time = now
+        self.previously_active = is_active
         return self.duration
+
+    def reset(self):
+        self.start_time = self.last_active_time = self.last_update_time = None
+        self.duration = 0.0
+        self.episode_triggered = self.previously_active = False
 
     @property
     def is_accumulating(self) -> bool:
@@ -146,7 +157,7 @@ class DriverStateDetector:
         distraction_duration_s: float = DISTRACTION_DURATION_S,
         grace_period_s: float = GRACE_PERIOD_S,
     ):
-        self.ear_threshold = ear_threshold
+        self.ear_threshold = ear_threshold  # compatibilidade: não decide fechamento isoladamente
         self.mar_threshold = mar_threshold
         self.yaw_threshold = yaw_threshold
         self.pitch_threshold = pitch_threshold
@@ -166,6 +177,11 @@ class DriverStateDetector:
             distraction_duration_s, grace_period_s
         )
 
+    def reset(self) -> None:
+        """Descarta episódios anteriores ao entrar ou sair de uma calibração."""
+        for tracker in (self.eyes_tracker, self.yawn_tracker, self.distraction_tracker):
+            tracker.reset()
+
     def update(self, metrics: Optional[FrameMetrics], now: float) -> DetectionResult:
         """
         Avalia as metricas do frame no instante 'now' (tempo monotonico em segundos).
@@ -173,7 +189,8 @@ class DriverStateDetector:
         """
         # Caso 1: Rosto nao detectado no frame
         if metrics is None:
-            eyes_dur = self.eyes_tracker.update(False, now)
+            self.eyes_tracker.reset()
+            eyes_dur = 0.0
             yawn_dur = self.yawn_tracker.update(False, now)
             distr_dur = self.distraction_tracker.update(False, now)
 
@@ -188,7 +205,9 @@ class DriverStateDetector:
             )
 
         # Caso 2: Rosto detectado - avalia condicoes booleanas instantaneas
-        is_eyes_closed = metrics.ear < self.ear_threshold
+        is_eyes_closed = metrics.eye_closure is True
+        if metrics.eye_closure is None:
+            self.eyes_tracker.reset()
         is_yawn = metrics.mar > self.mar_threshold
         is_distracted = (
             abs(metrics.yaw) > self.yaw_threshold
@@ -201,17 +220,13 @@ class DriverStateDetector:
         distr_dur = self.distraction_tracker.update(is_distracted, now)
 
         # Verifica se algum rastreador cruzou o limiar de disparo neste frame
-        eyes_crossed = self.eyes_tracker.should_trigger_episode()
         yawn_crossed = self.yawn_tracker.should_trigger_episode()
-        distraction_crossed = self.distraction_tracker.should_trigger_episode()
 
-        # Prioridade: fadiga (olhos fechados ou bocejo sustentado) sobre distracao
-        fatigue = (
-            self.eyes_tracker.is_threshold_reached
-            or self.yawn_tracker.is_threshold_reached
-        )
+        # Olhos são auxiliares: nunca disparam fadiga nem antecipam distração.
+        fatigue = self.yawn_tracker.is_threshold_reached
+        distraction_crossed = (not fatigue and self.distraction_tracker.should_trigger_episode())
         event_type: Optional[str] = None
-        if eyes_crossed or yawn_crossed:
+        if yawn_crossed:
             event_type = "fadiga"
         elif distraction_crossed and not fatigue:
             event_type = "distracao"
@@ -222,17 +237,17 @@ class DriverStateDetector:
             return min(1.0, 0.70 + 0.30 * max(0.0, duration - limit) / 1.5)
 
         score = 0.0
-        if self.eyes_tracker.is_threshold_reached:
-            driver_state = "FADIGA"
-            score = _score(eyes_dur, self.eyes_closed_duration_s)
-        elif self.yawn_tracker.is_threshold_reached:
+        eye_support = (is_distracted and is_eyes_closed
+                       and self.distraction_tracker.is_threshold_reached
+                       and self.eyes_tracker.is_threshold_reached and not fatigue)
+        if self.yawn_tracker.is_threshold_reached:
             driver_state = "FADIGA"
             score = _score(yawn_dur, self.yawn_duration_s)
         elif self.distraction_tracker.is_threshold_reached:
             driver_state = "DISTRAIDO"
             score = _score(distr_dur, self.distraction_duration_s)
-        elif self.eyes_tracker.is_accumulating:
-            driver_state = "PISCANDO"
+            # Bônus experimental limitado; score não representa probabilidade.
+            score = min(1.0, score + (0.05 if eye_support else 0.0))
         elif self.yawn_tracker.is_accumulating:
             driver_state = "BOCEJANDO"
         else:
@@ -246,4 +261,5 @@ class DriverStateDetector:
             eyes_closed_duration=round(eyes_dur, 3),
             yawn_duration=round(yawn_dur, 3),
             distraction_duration=round(distr_dur, 3),
+            eye_support=eye_support,
         )
