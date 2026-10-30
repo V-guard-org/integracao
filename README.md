@@ -71,6 +71,19 @@ python3 vision/scripts/download_model.py     # baixa vision/models/face_landmark
 > USB **Logitech C525** usa `--source 0` (sem visão noturna), ver
 > [docs/camera-c525.md](docs/camera-c525.md).
 
+**Trocar de câmera.** O V-GUARD usa uma câmera por vez, escolhida pelo `--source`
+ao iniciar. Para trocar, encerre o programa (Ctrl+C), conecte a outra câmera (a
+OV5647 só com a Pi desligada; a C525 pode ser plugada com ela ligada) e inicie de
+novo com o `--source` dela:
+
+| Câmera | Comando | Calibração na tela da Pi |
+|---|---|---|
+| OV5647 (noturna, padrão) | `python3 vguard.py --headless` | `bash tools/test_camera_gui.sh --calibrate` |
+| Logitech C525 (USB) | `python3 vguard.py --headless --source 0` | `CAMERA_ARGS="--source 0" bash tools/test_camera_gui.sh --calibrate` |
+
+O perfil de calibração guarda a câmera usada: **refaça a calibração sempre que
+trocar de câmera.**
+
 ```bash
 python3 vguard.py --headless                 # na Pi, câmera CSI OV5647 via Picamera2, sem janela
 ```
