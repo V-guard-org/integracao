@@ -92,18 +92,14 @@ def open_capture(source: Union[int, str], width: int, height: int,
 
     import cv2
 
-    if not is_webcam(source):
-        cap = cv2.VideoCapture(source)
-    elif sys.platform.startswith("linux"):
-        # V4L2 direto: no Linux o backend padrão pode cair no GStreamer, que
-        # ignora resolução/buffer e acrescenta atraso na Logitech C525.
-        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
-    else:
-        cap = cv2.VideoCapture(source)
+    live = is_webcam(source)
+    # V4L2 direto: no Linux o backend padrão pode cair no GStreamer, que
+    # ignora resolução/buffer e acrescenta atraso na Logitech C525.
+    cap = cv2.VideoCapture(source, cv2.CAP_V4L2 if live and sys.platform.startswith("linux") else cv2.CAP_ANY)
     if not cap.isOpened():
         cap.release()
         raise RuntimeError(f"Nao foi possivel abrir a fonte de video: {source}")
-    if is_webcam(source):
+    if live:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, fps)

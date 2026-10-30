@@ -14,7 +14,9 @@ Ponto de entrada: ../vguard.py (este modulo so fornece VisionPipeline e parse_ar
 
 import argparse
 from dataclasses import replace
+import importlib.util
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -371,9 +373,9 @@ def parse_args(argv=None, parser=None):
     parser.add_argument(
         "--source",
         type=str,
-        default="0",
-        help="Indice da webcam Logitech C525 (padrao: 0), dispositivo /dev/v4l/by-id/..., "
-             "picamera2 para CSI ou arquivo de video",
+        default="picamera2",
+        help="picamera2 para CSI OV5647 (padrao), indice de webcam (ex: 0 para a C525), "
+             "dispositivo /dev/v4l/by-id/... ou arquivo de video",
     )
     parser.add_argument(
         "--width",
@@ -394,7 +396,8 @@ def parse_args(argv=None, parser=None):
     parser.add_argument("--infrared", action="store_true",
                         help="Fixa ganhos de cor para iluminacao IR na CSI; nao aciona LEDs/IR-CUT")
     parser.add_argument("--camera-python",
-                        help="Python com Picamera2/libcamera, ex: /usr/bin/python3; captura em processo auxiliar")
+                        help="Python com Picamera2/libcamera para a captura em processo auxiliar "
+                             "(padrao: /usr/bin/python3 se o Python atual nao tiver picamera2)")
     parser.add_argument("--calibration-file", type=Path,
                         help="Perfil JSON do motorista e montagem; se faltar, guia C/F/S no HUD")
     parser.add_argument("--calibrate", action="store_true",
@@ -410,4 +413,24 @@ def parse_args(argv=None, parser=None):
         parser.error("--infrared, --camera-num e --camera-python exigem --source picamera2")
     if args.headless and args.calibrate:
         parser.error("--calibrate exige interface grafica; retire --headless")
+    if args.source == "picamera2" and args.camera_python is None:
+        args.camera_python = auto_camera_python()
     return args
+
+
+# Raspberry Pi OS: picamera2/libcamera vêm no Python do sistema.
+SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+def auto_camera_python() -> Optional[str]:
+    """
+    Python do sistema para a captura CSI quando o Python atual não tem picamera2.
+
+    No Trixie a visão roda num ambiente 3.11 (MediaPipe) e o picamera2 só existe
+    no Python 3.13 do sistema: sem isto seria preciso lembrar --camera-python.
+    """
+    if importlib.util.find_spec("picamera2") is not None:
+        return None
+    if os.path.realpath(sys.executable) == os.path.realpath(SYSTEM_PYTHON):
+        return None
+    return SYSTEM_PYTHON if os.path.exists(SYSTEM_PYTHON) else None

@@ -1,8 +1,7 @@
 # Webcam Logitech C525 na aplicação integrada
 
-Branch `webcam`: a visão usa a webcam USB **Logitech C525** (HD 720p,
-foco automático) como câmera padrão. A câmera noturna OV5647 fica no branch
-`cam_rasp`.
+A visão pode usar a webcam USB **Logitech C525** (HD 720p, foco automático)
+com `--source 0`. A câmera padrão é a noturna OV5647 ([camera-ov5647.md](camera-ov5647.md)).
 
 ## Limites desta câmera
 
@@ -38,10 +37,8 @@ ls /dev/v4l/by-id/
 
 ## Executar
 
-A fonte padrão já é a webcam 0:
-
 ```bash
-python3 vguard.py --headless
+python3 vguard.py --headless --source 0
 ```
 
 Com outra câmera ligada, aponte para o nome fixo da C525:
@@ -53,7 +50,7 @@ python3 vguard.py --headless --source /dev/v4l/by-id/<nome-da-c525>-video-index0
 Calibração do motorista, na tela da Pi:
 
 ```bash
-bash tools/test_camera_gui.sh --calibrate
+CAMERA_ARGS="--source 0" bash tools/test_camera_gui.sh --calibrate
 ```
 
 O perfil de calibração guarda a câmera usada. **Ao trocar entre a C525 e a
@@ -86,11 +83,11 @@ python3 -B test_vguard.py
 ```
 
 Conferem que a webcam abre pelo V4L2 com 1 buffer, que o caminho
-`/dev/v4l/by-id/...` é tratado como webcam, que a C525 é a fonte padrão e que a
+`/dev/v4l/by-id/...` é tratado como webcam, que o índice `0` chega ao pipeline como número e que a
 webcam parar vira erro, enquanto o fim de um vídeo não.
 
 Com a câmera ligada, a gravação real de um evento pode ser conferida com:
 
 ```bash
-python3 -B tools/validate_camera_persistence.py --frames 120 --data-dir /tmp/vguard-c525
+python3 -B tools/validate_camera_persistence.py --source 0 --frames 120 --data-dir /tmp/vguard-c525
 ```

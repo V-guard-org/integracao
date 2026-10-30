@@ -99,7 +99,7 @@ class OpenCvCaptureTests(unittest.TestCase):
 
     def test_video_does_not_require_picamera2_or_change_properties(self):
         cap = open_capture("test.mp4", 640, 480)
-        self.cv2.VideoCapture.assert_called_once_with("test.mp4")
+        self.cv2.VideoCapture.assert_called_once_with("test.mp4", self.cv2.CAP_ANY)
         cap.set.assert_not_called()
 
     def test_webcam_receives_dimensions_and_fps(self):
