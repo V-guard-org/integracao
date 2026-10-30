@@ -61,8 +61,9 @@ pode ser criado a partir da raiz do repositório, preservando o ambiente existen
 .venv-csi/bin/python vision/scripts/download_model.py
 ```
 
-No Debian 13 Trixie com Python de sistema 3.13, use
-`--camera-python /usr/bin/python3`. Nesse modo, apenas a captura roda num auxiliar
+No Debian 13 Trixie com Python de sistema 3.13, a captura usa
+`/usr/bin/python3` sozinha quando o Python da visão não tem `picamera2`
+(branch `cam_rasp`); `--camera-python /usr/bin/python3` continua valendo. Nesse modo, apenas a captura roda num auxiliar
 com os bindings do sistema. Um pipe transmite frames BGR sem compressão para a
 aplicação 3.11. A inferência e os eventos continuam na aplicação principal; o
 auxiliar é encerrado junto dela, inclusive em erro. Não é necessário recompilar
@@ -151,6 +152,24 @@ cadência menor se a exposição noturna for insuficiente. Isso não substitui l
 
 O acionamento dos iluminadores e do filtro IR-CUT depende do módulo comprado.
 Não há acionamento por GPIO neste código sem pinagem/interface confirmadas.
+
+### Módulo noturno com 2 LEDs infravermelhos
+
+No módulo comprado (OV5647 5 MP com duas placas de LED IR parafusadas ao lado
+da lente), confira na placa antes de usar:
+
+- **Os LEDs costumam ser automáticos:** em geral cada placa tem um sensor de luz
+  (fotorresistor) e um potenciômetro, e os LEDs acendem sozinhos no escuro. O
+  software não os liga nem desliga. Se acenderem cedo ou tarde demais, ajuste o
+  potenciômetro com o carro parado, no escuro de verdade.
+- **Use `--infrared` à noite.** Sem filtro IR-CUT, a imagem sob os LEDs fica
+  sem cor útil e o balanço de branco automático oscila; o perfil fixa os ganhos.
+  De dia, sem a opção, o balanço automático compensa o tom rosado da falta do filtro.
+- **Os LEDs esquentam e puxam corrente** da própria placa da câmera. Deixe
+  espaço de ventilação no gabinete e confirme a corrente no orçamento de
+  alimentação (diagrama `06_hw_alimentacao`).
+- **Reflexo nos óculos:** os LEDs ao lado da lente podem refletir nas lentes do
+  motorista e esconder os olhos; teste com e sem óculos.
 A OV5647 não fornece autofoco; ajuste o foco mecanicamente, se a lente permitir,
 com o rosto na distância de uso. Confirme o enquadramento na foto de teste.
 

@@ -66,8 +66,13 @@ pip install -r vision/requirements.txt
 python3 vision/scripts/download_model.py     # baixa vision/models/face_landmarker.task (se faltar)
 ```
 
+> **Branch `cam_rasp`:** a câmera padrão deste branch é a **câmera noturna
+> OV5647** (CSI, 5 MP, 2 LEDs infravermelhos). Preparo, LEDs e teste noturno em
+> [docs/camera-ov5647.md](docs/camera-ov5647.md). A webcam Logitech C525 fica no
+> branch `webcam`.
+
 ```bash
-python3 vguard.py --headless                 # na Pi, câmera CSI via Picamera2, sem janela
+python3 vguard.py --headless                 # na Pi, câmera CSI OV5647 via Picamera2, sem janela
 ```
 
 ```bash
@@ -76,8 +81,9 @@ python3 vguard.py --source video.mp4         # no notebook, com HUD (q para sair
 
 Outras opções: `--source 0` (webcam USB), `--width`/`--height` (padrão 640×480),
 `--fps 30`, `--camera-num 0` e `--infrared`. A fonte padrão é `picamera2` (CSI).
-Se a câmera e a visão usam versões diferentes de Python, acrescente
-`--camera-python /usr/bin/python3` para capturar pelo interpretador do sistema.
+Se o Python da visão não tiver `picamera2` (caso do Raspberry Pi OS Trixie, com a
+visão num ambiente 3.11), a captura passa sozinha para o Python do sistema
+(`/usr/bin/python3`); `--camera-python` só é preciso para usar outro interpretador.
 Para a câmera noturna OV5647, siga [o preparo e os testes na Raspberry Pi](docs/camera-ov5647.md).
 Para montagem lateral junto ao retrovisor, use a [calibração guiada do motorista](docs/calibracao-motorista.md).
 Olhos são um sinal auxiliar da distração e não disparam fadiga isoladamente.

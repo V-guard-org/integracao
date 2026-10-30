@@ -29,6 +29,22 @@ class ApplicationLifecycle(unittest.TestCase):
         self.assertTrue(options["infrared"])
         self.assertEqual(options["camera_python"], "/usr/bin/python3")
 
+    def test_csi_capture_picks_the_system_python_when_needed(self):
+        vision = vguard.sys.modules["main"]
+        cases = (   # (picamera2 aqui?, Python atual, esperado)
+            (True, "/home/pi/.venv/bin/python", None),
+            (False, "/home/pi/.venv/bin/python", "/usr/bin/python3"),
+            (False, vision.SYSTEM_PYTHON, None),
+        )
+        for has_picamera2, executable, expected in cases:
+            with self.subTest(has_picamera2=has_picamera2, executable=executable), \
+                 patch.object(vision.importlib.util, "find_spec", return_value=object() if has_picamera2 else None), \
+                 patch.object(vision.sys, "executable", executable), \
+                 patch.object(vision.os.path, "exists", return_value=True):
+                self.assertEqual(vision.parse_args([]).camera_python, expected)
+                # Webcam ou vídeo nunca recebem o auxiliar CSI.
+                self.assertIsNone(vision.parse_args(["--source", "0"]).camera_python)
+
     def test_invalid_camera_options_fail_before_database_creation(self):
         for options in (["--fps", "nan"], ["--fps", "0"], ["--width", "0"],
                         ["--camera-num", "-1"], ["--source", "0", "--infrared"],
