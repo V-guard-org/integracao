@@ -8,8 +8,11 @@ Teste de integracao do pipeline de visao computacional (main.py) com o Mock do E
 
 import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 
@@ -18,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from detector import DetectionResult
 from main import VisionPipeline
+from calibration import CalibrationProfile
+from metrics import FrameMetrics
 
 
 class MockEventManager:
@@ -158,6 +163,38 @@ def test_vision_pipeline_end_to_end():
             temp_video_path.unlink()
 
 
+def test_csi_frame_to_event():
+    """CSI substituta, MediaPipe real e JPEG: protege ordem BGR e limpeza."""
+    print("\n[3] Validando captura CSI integrada e cores do JPEG sem HUD...")
+    manager = MockEventManager()
+    camera = Mock()
+    # RGB888 da Picamera2 entrega um array BGR ao OpenCV.
+    raw = np.full((480, 640, 3), (25, 90, 210), dtype=np.uint8)
+    camera.capture_array.side_effect = lambda stream: raw.copy()
+    factory = Mock(return_value=camera)
+    with patch.dict(sys.modules, {"picamera2": SimpleNamespace(Picamera2=factory)}):
+        pipeline = VisionPipeline(event_manager=manager, headless=True,
+                                  source="picamera2", max_frames=2)
+        pipeline.detector.update = Mock(side_effect=[
+            DetectionResult(driver_state="FADIGA", should_record=True,
+                            event_type="fadiga", score=0.88,
+                            eyes_closed_duration=1.2, yawn_duration=0.0,
+                            distraction_duration=0.0),
+            DetectionResult(driver_state="NORMAL", should_record=False,
+                            event_type=None, score=0.0,
+                            eyes_closed_duration=0.0, yawn_duration=0.0,
+                            distraction_duration=0.0),
+        ])
+        assert pipeline.run() == 1
+    decoded = cv2.imdecode(np.frombuffer(manager.recorded_events[0]["jpeg"], np.uint8),
+                           cv2.IMREAD_COLOR)
+    assert decoded.shape == raw.shape
+    assert np.allclose(decoded.mean(axis=(0, 1)), (25, 90, 210), atol=3)
+    camera.stop.assert_called_once()
+    camera.close.assert_called_once()
+    print("    -> OK: CSI -> MediaPipe -> evento, cores BGR e fechamento preservados.")
+
+
 def run_all_tests():
     print("=" * 65)
     print("TESTE DE INTEGRAÇÃO: main.py + EventManager Mock (V-GUARD)")
@@ -165,10 +202,52 @@ def run_all_tests():
 
     test_jpeg_encoding_and_contract()
     test_vision_pipeline_end_to_end()
+    test_csi_frame_to_event()
+    test_calibration_blocks_events_and_loaded_pose_reaches_detector()
 
     print("\n" + "=" * 65)
     print("TODOS OS TESTES DE INTEGRAÇÃO PASSARAM COM SUCESSO!")
     print("=" * 65)
+
+
+def test_calibration_blocks_events_and_loaded_pose_reaches_detector():
+    """Assistente bloqueia persistência e perfil recarregado corrige a pose no loop real."""
+    raw = FrameMetrics(.21, .1, .155, .005, -23.4, 37.1, -12)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'calibration-driver.json'
+        manager = MockEventManager()
+        pipeline = VisionPipeline(manager, calibration_path=path, max_frames=4)
+        camera, landmarker = Mock(), Mock()
+        camera.read.side_effect = lambda: (True, frame.copy())
+        landmarker.detect_for_video.return_value = SimpleNamespace(face_landmarks=[[object()]])
+        pipeline.detector.update = Mock(return_value=DetectionResult(
+            'FADIGA', True, 'fadiga', .9, 2, 0, 0))
+        with patch.object(pipeline, '_open_capture', return_value=camera), \
+             patch.object(pipeline, '_init_landmarker', return_value=landmarker), \
+             patch('main.extract_all_metrics', return_value=raw), \
+             patch('main.draw_landmarks'), patch('main.cv2.imshow'), \
+             patch('main.cv2.waitKey', return_value=-1), patch('main.cv2.destroyAllWindows'):
+            assert pipeline.run() == 0
+        assert not manager.recorded_events
+        camera.release.assert_called_once()
+        CalibrationProfile.from_neutral([raw] * 30, 640, 480,
+            context='source=picamera2;camera=0;infrared=False').save(path)
+        loaded = VisionPipeline(manager, headless=True, calibration_path=path, max_frames=40)
+        with patch.object(loaded, '_open_capture', return_value=camera), \
+             patch.object(loaded, '_init_landmarker', return_value=landmarker), \
+             patch('main.extract_all_metrics', return_value=raw), \
+             patch('main.time.monotonic', side_effect=[i / 10 for i in range(50)]):
+            assert loaded.run() == 0
+        assert loaded.detector.distraction_tracker.duration == 0
+        assert not manager.recorded_events
+        with patch('main.open_capture') as capture:
+            try:
+                VisionPipeline(manager, headless=True, calibration_path=path, calibrate=True)
+                raise AssertionError('Calibracao interativa nao pode ser headless')
+            except ValueError:
+                pass
+            capture.assert_not_called()
 
 
 if __name__ == "__main__":

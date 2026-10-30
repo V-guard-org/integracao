@@ -43,6 +43,8 @@ class FrameMetrics:
     pitch: float
     yaw: float
     roll: float
+    # None = sinal ocular sem referência/confiabilidade; só a calibração preenche.
+    eye_closure: bool | None = None
 
 
 # ==============================================================================
@@ -161,7 +163,8 @@ def calculate_head_pose(
     )
 
     if not success:
-        return 0.0, 0.0, 0.0
+        # Uma falha não pode virar uma amostra de pose neutra na calibração.
+        return math.nan, math.nan, math.nan
 
     rotation_matrix, _ = cv2.Rodrigues(rvec)
     angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_matrix)

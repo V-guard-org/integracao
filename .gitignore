@@ -1,6 +1,7 @@
 # Dados gravados pelo vguard.py: banco, telemetria e fotos do motorista.
 # Nunca versionar (privacidade).
 dados/
+calibration-*.json
 *.db
 *.db-shm
 *.db-wal
@@ -25,6 +26,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv-csi/
 venv/
 env/
 

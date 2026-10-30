@@ -1,4 +1,4 @@
-"""Teste opt-in: webcam real e evento SINTÉTICO identificado, sem UART/backend.
+"""Teste opt-in: câmera real e evento SINTÉTICO identificado, sem UART/backend.
 
 Usa vguard.run(), FaceLandmarker, detector temporal e EventManager reais.
 Apenas as métricas entregues ao detector são substituídas em memória para
@@ -30,6 +30,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True, help="Diretório novo exclusivo deste teste")
     parser.add_argument("--frames", type=int, default=120)
+    parser.add_argument("--source", default="picamera2", help="picamera2 (CSI) ou índice da webcam")
+    parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument("--camera-num", type=int, default=0)
+    parser.add_argument("--infrared", action="store_true")
+    parser.add_argument("--camera-python")
     args = parser.parse_args()
     if args.frames < 60:
         parser.error("use pelo menos 60 frames para atravessar o limiar temporal")
@@ -37,13 +42,18 @@ def main():
     data.mkdir(parents=True, exist_ok=False)
     manifest = {
         "synthetic": True,
-        "description": "Métricas de olhos fechados injetadas no detector; JPEG da webcam real",
+        "description": "Métricas de bocejo injetadas no detector; JPEG da câmera real",
+        "source": args.source,
+        "infrared": args.infrared,
+        "camera_num": args.camera_num,
+        "requested_fps": args.fps,
+        "camera_python": args.camera_python,
         "event_type": "teste_integracao_sintetico_fadiga",
         "backend_enabled": False,
         "uart_enabled": False,
     }
     (data / "test-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    synthetic = FrameMetrics(ear_left=0.1, ear_right=0.1, ear=0.1, mar=0.1, pitch=0, yaw=0, roll=0)
+    synthetic = FrameMetrics(ear_left=0.3, ear_right=0.3, ear=0.3, mar=0.75, pitch=0, yaw=0, roll=0)
     original_update = DriverStateDetector.update
     frames = 0
     face_frames = 0
@@ -52,7 +62,8 @@ def main():
         nonlocal frames, face_frames
         frames += 1
         if real_metrics is not None:
-            assert all(math.isfinite(value) for value in asdict(real_metrics).values())
+            assert all(math.isfinite(value) for key, value in asdict(real_metrics).items()
+                       if key != "eye_closure")
             face_frames += 1
         result = original_update(detector, synthetic, now)
         if result.should_record:
@@ -62,8 +73,14 @@ def main():
     started = time.perf_counter()
     with patch.dict(os.environ, {"VGUARD_DATA": str(data)}), \
          patch.object(DriverStateDetector, "update", controlled_update):
-        count = vguard.run(["--headless", "--source", "0", "--no-uart", "--no-gps", "--no-sync",
-                            "--max-frames", str(args.frames)])
+        camera_args = ["--headless", "--source", args.source, "--no-uart", "--no-gps", "--no-sync",
+                       "--fps", str(args.fps), "--camera-num", str(args.camera_num),
+                       "--max-frames", str(args.frames)]
+        if args.infrared:
+            camera_args.append("--infrared")
+        if args.camera_python:
+            camera_args.extend(["--camera-python", args.camera_python])
+        count = vguard.run(camera_args)
     elapsed = time.perf_counter() - started
     assert frames == args.frames, (frames, args.frames)
     assert count == 1, count

@@ -8,12 +8,15 @@ A primeira versão utiliza o MediaPipe Face Landmarker para realizar a detecçã
 - MAR (Mouth Aspect Ratio)
 - Yaw, Pitch e Roll (orientação da cabeça)
 
-A implementação inicial utiliza Python e OpenCV e pode ser executada utilizando uma webcam.
+A captura padrão usa a câmera CSI OV5647 da Raspberry Pi via Picamera2/libcamera.
+Python, OpenCV e MediaPipe processam os frames. Webcam USB (`--source 0`) e arquivos
+de vídeo continuam disponíveis. O preparo e a validação no hardware estão no
+[guia da câmera noturna OV5647](../docs/camera-ov5647.md).
 
 ## Requisitos
 
 - Python 3.10 ou 3.11
-- Webcam
+- Raspberry Pi com câmera CSI OV5647 (ou webcam/vídeo para testes)
 - pip
 - Git (opcional)
 
@@ -36,6 +39,8 @@ edge/vguard/vision/
 ├── metrics.py                      # Funções matemáticas puras (EAR, MAR em pixels e solvePnP)
 ├── detector.py                     # Análise temporal, máquina de estados e histerese
 ├── main.py                         # VisionPipeline (entrada: ../vguard.py)
+├── capture.py                      # CSI Picamera2 e webcam/vídeo OpenCV; frames BGR
+├── test_capture.py                 # Contratos e liberação da câmera CSI
 ├── test_metrics.py                 # Testes unitários de EAR, MAR, Head Pose e aspect ratio
 ├── test_detector.py                # Testes de validação temporal do detector
 ├── test_pipeline_integration.py    # Teste de integração end-to-end com Mock do EventManager
@@ -95,12 +100,14 @@ Com o ambiente virtual ativado:
 ```bash
 pip install -r requirements.txt
 ```
-As dependências utilizadas atualmente são:
+As dependências genéricas para o notebook são:
 ```
 mediapipe==0.10.35
 opencv-python==4.11.0.86
 numpy==2.1.3
 ```
+Na Pi 4B use as versões de `../requirements-pi4-py311.txt` e instale Picamera2
+pelo sistema, conforme o guia da OV5647. Não misture as duas listas de versões.
 #### 5. Modelo do MediaPipe
 
 O projeto utiliza o modelo `face_landmarker.task` localizado em `models/face_landmarker.task`.
@@ -120,13 +127,18 @@ Com o ambiente virtual ativado:
 ```bash
 python ../vguard.py
 ```
-O programa abrirá a webcam e exibirá o overlay com EAR, MAR, Head Pose, Estado e FPS.
+O programa abrirá a câmera CSI e exibirá o overlay com EAR, MAR, Head Pose, Estado e FPS.
+Para webcam USB, acrescente `--source 0`.
 Pressione **Q** para encerrar.
 
 **Modo Headless (Sem interface gráfica — recomendado para Raspberry Pi):**
 ```bash
 python ../vguard.py --headless
 ```
+Sob iluminação infravermelha, experimente `--infrared` para fixar os ganhos de cor;
+essa opção não aciona LEDs nem comuta o filtro IR-CUT da placa.
+No Debian 13, acrescente `--camera-python /usr/bin/python3` para capturar pelo
+Python 3.13 do sistema enquanto a visão usa o ambiente compatível 3.11.
 
 **Executar a partir de arquivo de vídeo gravado:**
 ```bash
