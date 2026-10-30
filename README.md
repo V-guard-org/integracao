@@ -66,16 +66,22 @@ pip install -r vision/requirements.txt
 python3 vision/scripts/download_model.py     # baixa vision/models/face_landmarker.task (se faltar)
 ```
 
+> **Branch `webcam`:** a câmera padrão deste branch é a webcam USB
+> **Logitech C525**. Preparo, limites (sem visão noturna) e testes em
+> [docs/camera-c525.md](docs/camera-c525.md). A câmera noturna OV5647 fica no
+> branch `cam_rasp`.
+
 ```bash
-python3 vguard.py --headless                 # na Pi, câmera CSI via Picamera2, sem janela
+python3 vguard.py --headless                 # na Pi, webcam Logitech C525 (índice 0), sem janela
 ```
 
 ```bash
 python3 vguard.py --source video.mp4         # no notebook, com HUD (q para sair)
 ```
 
-Outras opções: `--source 0` (webcam USB), `--width`/`--height` (padrão 640×480),
-`--fps 30`, `--camera-num 0` e `--infrared`. A fonte padrão é `picamera2` (CSI).
+Outras opções: `--source /dev/v4l/by-id/...` (a C525 por um nome fixo), `--source picamera2`
+(câmera CSI), `--width`/`--height` (padrão 640×480), `--fps 30`, `--camera-num 0` e
+`--infrared` (só CSI). A fonte padrão deste branch é a webcam `0`.
 Se a câmera e a visão usam versões diferentes de Python, acrescente
 `--camera-python /usr/bin/python3` para capturar pelo interpretador do sistema.
 Para a câmera noturna OV5647, siga [o preparo e os testes na Raspberry Pi](docs/camera-ov5647.md).

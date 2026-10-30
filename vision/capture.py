@@ -9,6 +9,7 @@ from pathlib import Path
 import select
 import struct
 import subprocess
+import sys
 import time
 from typing import Any, Optional, Protocol, Union
 
@@ -91,15 +92,30 @@ def open_capture(source: Union[int, str], width: int, height: int,
 
     import cv2
 
-    cap = cv2.VideoCapture(source)
+    if not is_webcam(source):
+        cap = cv2.VideoCapture(source)
+    elif sys.platform.startswith("linux"):
+        # V4L2 direto: no Linux o backend padrão pode cair no GStreamer, que
+        # ignora resolução/buffer e acrescenta atraso na Logitech C525.
+        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    else:
+        cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         cap.release()
         raise RuntimeError(f"Nao foi possivel abrir a fonte de video: {source}")
-    if isinstance(source, int):
+    if is_webcam(source):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, fps)
+        # A inferência (~14 FPS na Pi) é mais lenta que a câmera (30 FPS):
+        # com 1 buffer, cada leitura pega o quadro mais novo, sem fila atrasada.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
+
+
+def is_webcam(source: Union[int, str]) -> bool:
+    """Índice (0) ou dispositivo V4L2 (/dev/video0, /dev/v4l/by-id/...): câmera ao vivo."""
+    return isinstance(source, int) or str(source).startswith("/dev/")
 
 
 class CameraProcessCapture:

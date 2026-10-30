@@ -19,8 +19,8 @@ class ApplicationLifecycle(unittest.TestCase):
     def test_csi_options_reach_integrated_pipeline(self):
         with patch.object(vguard, "EventManager"), \
              patch.object(vguard, "VisionPipeline") as pipeline:
-            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync", "--infrared",
-                        "--camera-num", "1", "--fps", "20",
+            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync", "--source", "picamera2",
+                        "--infrared", "--camera-num", "1", "--fps", "20",
                         "--camera-python", "/usr/bin/python3"])
         options = pipeline.call_args.kwargs
         self.assertEqual(options["source"], "picamera2")
@@ -28,6 +28,13 @@ class ApplicationLifecycle(unittest.TestCase):
         self.assertEqual(options["camera_num"], 1)
         self.assertTrue(options["infrared"])
         self.assertEqual(options["camera_python"], "/usr/bin/python3")
+
+    def test_default_source_is_the_c525_webcam(self):
+        with patch.object(vguard, "EventManager"), \
+             patch.object(vguard, "VisionPipeline") as pipeline:
+            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync"])
+        self.assertEqual(pipeline.call_args.kwargs["source"], 0)
+        self.assertFalse(pipeline.call_args.kwargs["infrared"])
 
     def test_invalid_camera_options_fail_before_database_creation(self):
         for options in (["--fps", "nan"], ["--fps", "0"], ["--width", "0"],
