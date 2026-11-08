@@ -2,11 +2,11 @@
 V-GUARD — Processo único da Raspberry Pi: visão + gerenciador de eventos.
 
     câmera --> VisionPipeline --record_event()--> EventManager --> SD
-    ESP32  --> UartReader     --update()-------->      |
+    ESP32  --> Esp32Reader    --update()-------->      |
     GNSS   --> GpsReader      --update()-------->      |
                                      Sync <--pending_*/ack_*--+
 
-A visão roda na thread principal (cv2.imshow exige); UART, GPS e Sync em threads.
+A visão roda na thread principal (cv2.imshow exige); ESP32, GPS e Sync em threads.
 
     python3 vguard.py --headless              # na Pi
     python3 vguard.py --source video.mp4      # no notebook
@@ -22,16 +22,18 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, "events"), os.path.join(HERE, "vision")]
 
+from esp32_reader import Esp32Reader
 from event_manager import EventManager
 from gps_reader import GpsReader
 from sync import Sync
-from uart_reader import UartReader
 from main import VisionPipeline, parse_args  # vision/main.py
 
 
 def run(argv=None):
     parser = argparse.ArgumentParser(description="V-GUARD — aplicação integrada da Raspberry Pi")
-    parser.add_argument("--no-uart", action="store_true", help="Executa sem iniciar o leitor do ESP32")
+    # --no-uart é o nome antigo, de quando o ESP32 ficava na UART.
+    parser.add_argument("--no-esp32", "--no-uart", dest="no_esp32", action="store_true",
+                        help="Executa sem iniciar o leitor do ESP32")
     parser.add_argument("--no-gps", action="store_true", help="Executa sem iniciar o leitor do GPS")
     parser.add_argument("--no-sync", action="store_true", help="Desativa sincronização e acesso ao backend")
     parser.add_argument("--max-frames", type=int, help="Encerra após processar este número de frames")
@@ -46,8 +48,8 @@ def run(argv=None):
     sync = None
 
     try:
-        if not args.no_uart:
-            reader = UartReader(manager)
+        if not args.no_esp32:
+            reader = Esp32Reader(manager)
             reader.start()
         if not args.no_gps:
             gps = GpsReader(manager)

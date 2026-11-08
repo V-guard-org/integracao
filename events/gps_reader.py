@@ -19,7 +19,7 @@ import termios
 from functools import reduce
 from operator import xor
 
-from uart_reader import UartReader
+from serial_port import SerialReader
 
 
 # ============================================================
@@ -77,11 +77,12 @@ def parse_rmc(line):
         return {}
 
 
-class GpsReader(UartReader):
-    """Reaproveita a thread, o select e a reabertura do UartReader; só o pump muda."""
+class GpsReader(SerialReader):
+    """Reaproveita a thread, o select e a reabertura do SerialReader; só o pump muda."""
 
     def __init__(self, manager, port=PORT, baud=BAUD):
-        super().__init__(manager, port, baud)
+        super().__init__(port, baud)
+        self.manager = manager
         self._pending = b""
 
     def pump(self, data):

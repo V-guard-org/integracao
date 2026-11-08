@@ -73,7 +73,7 @@ def main():
     started = time.perf_counter()
     with patch.dict(os.environ, {"VGUARD_DATA": str(data)}), \
          patch.object(DriverStateDetector, "update", controlled_update):
-        camera_args = ["--headless", "--source", args.source, "--no-uart", "--no-gps", "--no-sync",
+        camera_args = ["--headless", "--source", args.source, "--no-esp32", "--no-gps", "--no-sync",
                        "--fps", str(args.fps), "--camera-num", str(args.camera_num),
                        "--max-frames", str(args.frames)]
         if args.infrared:

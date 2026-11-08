@@ -21,7 +21,7 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
               ▼
         manager.record_event(type, score, jpeg, ts) ──► EventManager ──► SD (dados/)
                                                           ▲      │
- ESP32 ──UART──► UartReader ──manager.update("imu"|"obd")─┤      │
+ ESP32 ──USB───► Esp32Reader ─manager.update("imu"|"obd")─┤      │
  GNSS ───NMEA──► GpsReader ───manager.update("gps")───────┘      │
                                                                  ▼
                                           Sync ◄── pending_* / ack_* ──► backend
@@ -32,7 +32,9 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
 2. Nesse frame, a visão codifica a imagem **sem overlays** em JPEG e chama `record_event`.
 3. **EventManager** anexa a última amostra de cada sensor, grava a foto e a linha no SQLite
    e guarda a janela de telemetria de 10 s antes e 10 s depois do evento (RF17).
-4. **UartReader** (thread) decodifica o protocolo do ESP32 e alimenta `manager.update()` com IMU e OBD-II.
+4. **Esp32Reader** (thread) lê as linhas de texto do ESP32 pela USB (`$A`, `$O`, `$S`...), confere o
+   checksum e a `seq`, manda a hora (`$H`) e a taxa do OBD (`$C`) e alimenta `manager.update()` com
+   IMU e OBD-II. As amostras só entram depois de 10 linhas válidas seguidas. Ver [o leitor do ESP32](#leitor-do-esp32).
 5. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
    em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
 6. **Sync** (thread) envia a cada 60 s o que está pendente: metadados, telemetria e fotos por 4G ou Wi-Fi
@@ -98,7 +100,7 @@ Com o modelo em `vision/models/face_landmarker.task`, execute:
 cd /home/vguard/vguard/integracao
 VGUARD_DATA=/home/vguard/vguard/dados-integracao \
   /home/vguard/vguard/compat/mediapipe-0.10.18-py311/.venv/bin/python -B \
-  vguard.py --headless --source picamera2 --no-uart --no-sync
+  vguard.py --headless --source picamera2 --no-esp32 --no-sync
 ```
 
 Para CSI no mesmo processo, esse interpretador precisa importar `picamera2` e `libcamera`.
@@ -106,20 +108,22 @@ No Debian 13 com Python de sistema 3.13, use `--camera-python /usr/bin/python3`:
 a câmera roda em um auxiliar 3.13 e envia frames BGR ao pipeline MediaPipe 3.11.
 `--source 0` continua selecionando uma webcam USB.
 
-`--no-sync` não inicia a thread nem acessa o backend. `--no-uart` não inicia o leitor.
+`--no-sync` não inicia a thread nem acessa o backend. `--no-esp32` não inicia o leitor do ESP32
+(`--no-uart`, o nome antigo, continua valendo).
 Para uma execução limitada, acrescente `--max-frames 120`. Ctrl+C ou SIGTERM encerram
 os componentes antes de fechar o banco. A sincronização aguarda sua thread terminar;
 se houver envio em andamento, o encerramento pode esperar o timeout da conexão.
 
-Sem o ESP32 ou o GPS conectados, o leitor correspondente só registra um aviso a cada 2 s e
-tenta de novo. A visão e a gravação de eventos continuam funcionando.
+Sem o ESP32 ou o GPS conectados, o leitor correspondente registra um aviso e tenta de novo a
+cada 2 s. A visão e a gravação de eventos continuam funcionando.
 
 ### Variáveis de ambiente
 
 | Variável         | Padrão                       | Uso                                  |
 |------------------|------------------------------|--------------------------------------|
 | `VGUARD_DATA`    | `dados`                      | Pasta no cartão SD                    |
-| `VGUARD_UART`    | `/dev/ttyAMA5`               | UART ligada ao ESP32                  |
+| `VGUARD_ESP32`   | `/dev/vguard-esp32`          | USB do ESP32 (no notebook, `/dev/ttyUSB0`) |
+| `VGUARD_OBD_HZ`  | `12.5`                       | Taxa do OBD pedida ao ESP32 pelo `$C` (1 a 20, até 1 casa) |
 | `VGUARD_GPS`     | `/dev/serial0`               | UART ligada ao receptor GNSS          |
 | `VGUARD_GPS_BAUD`| `9600`                       | Velocidade da UART do GNSS            |
 | `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend                        |
@@ -128,6 +132,29 @@ tenta de novo. A visão e a gravação de eventos continuam funcionando.
 
 As redes Wi-Fi autorizadas ficam em `AUTHORIZED_WIFI` em `events/sync.py`.
 Os limiares da visão (EAR, MAR, yaw, pitch e tempos) ficam em `vision/config.py`.
+
+## Leitor do ESP32
+
+O ESP32 (repositório `firmware_esp32`) fica na USB da Pi e manda linhas de texto
+`$<tipo>,<seq>,<t>,...*<hh>` a 115200 baud. O `events/esp32_reader.py`:
+
+- confere cada linha: até 120 caracteres, checksum (o XOR do NMEA) e a `seq`, que soma 1 por linha;
+- conta as perdas: cada lacuna na `seq` soma em `lost`, e cada linha descartada em `corrupt`.
+  O texto do boot do ESP32 e o que chega nos primeiros 0,2 s depois de abrir a porta não contam;
+- manda o `$H` (a hora da Pi, só depois de sincronizada) ao ver um `$B` ou um `$S` com `ESPERA`,
+  e a cada 60 s; e o `$C,obd_hz,<n>` quando o `$S` mostra uma taxa diferente da `VGUARD_OBD_HZ`;
+- aceita as amostras depois de 10 linhas válidas seguidas: `$A` vira `update("imu", ...)` e `$O`
+  vira `update("obd", {..., "age_ms": ...})`;
+- marca o sensor sem dado (só o horário) quando o OBD não está em `LENDO`, quando o `$A` some e
+  quando o ESP32 desaparece por 3 s.
+
+Na bancada, com o firmware `esp32-sim` gravado no ESP32 e a placa na USB do notebook:
+
+```bash
+python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 600      # 10 min, resumo no fim
+python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 30 --obd-hz 5
+python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 20 --no-clock   # sem $H
+```
 
 ## O que fica no SD
 
@@ -151,15 +178,14 @@ python3 -B vision/test_calibration.py
 ```
 
 ```bash
-(cd events && python3 test_event_manager.py && python3 test_sync.py && python3 test_uart_reader.py && python3 test_gps_reader.py)
+(cd events && python3 test_event_manager.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py)
 python3 -B test_vguard.py
 ```
 
 Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`.
 
 `test_pipeline_integration.py` usa um mock do `EventManager` com a mesma assinatura do real.
-`events/test_uart_reader.py` precisa do ESP32 simulado em `../firmware_telemetria/host/fake_esp32.py`
-(ou `VGUARD_FIRMWARE=<pasta>`). `events/test_gps_reader.py` usa um receptor falso num pty.
+`events/test_esp32_reader.py` e `events/test_gps_reader.py` usam um ESP32 e um receptor falsos num pty.
 Os testes de `events/` precisam de Linux (na Pi ou no WSL).
 
 Teste opt-in da aplicação com câmera CSI e persistência reais, sem UART/backend,

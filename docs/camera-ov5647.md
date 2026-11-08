@@ -114,7 +114,7 @@ nem ESP32, em uma pasta de dados exclusiva do teste:
 VGUARD_DATA=/tmp/vguard-ov5647-live \
   python3 -B vguard.py --headless --source picamera2 \
   --camera-python /usr/bin/python3 \
-  --no-uart --no-sync --max-frames 120
+  --no-esp32 --no-sync --max-frames 120
 ```
 
 Depois execute a validação de persistência. A pasta passada em `--data-dir`
