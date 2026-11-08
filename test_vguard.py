@@ -19,8 +19,8 @@ class ApplicationLifecycle(unittest.TestCase):
     def test_csi_options_reach_integrated_pipeline(self):
         with patch.object(vguard, "EventManager"), \
              patch.object(vguard, "VisionPipeline") as pipeline:
-            vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync", "--infrared",
-                        "--camera-num", "1", "--fps", "20",
+            vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync", "--source", "picamera2",
+                        "--infrared", "--camera-num", "1", "--fps", "20",
                         "--camera-python", "/usr/bin/python3"])
         options = pipeline.call_args.kwargs
         self.assertEqual(options["source"], "picamera2")
@@ -28,6 +28,29 @@ class ApplicationLifecycle(unittest.TestCase):
         self.assertEqual(options["camera_num"], 1)
         self.assertTrue(options["infrared"])
         self.assertEqual(options["camera_python"], "/usr/bin/python3")
+
+    def test_c525_webcam_index_reaches_pipeline_as_int(self):
+        with patch.object(vguard, "EventManager"), \
+             patch.object(vguard, "VisionPipeline") as pipeline:
+            vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync", "--source", "0"])
+        self.assertEqual(pipeline.call_args.kwargs["source"], 0)
+        self.assertFalse(pipeline.call_args.kwargs["infrared"])
+
+    def test_csi_capture_picks_the_system_python_when_needed(self):
+        vision = vguard.sys.modules["main"]
+        cases = (   # (picamera2 aqui?, Python atual, esperado)
+            (True, "/home/pi/.venv/bin/python", None),
+            (False, "/home/pi/.venv/bin/python", "/usr/bin/python3"),
+            (False, vision.SYSTEM_PYTHON, None),
+        )
+        for has_picamera2, executable, expected in cases:
+            with self.subTest(has_picamera2=has_picamera2, executable=executable), \
+                 patch.object(vision.importlib.util, "find_spec", return_value=object() if has_picamera2 else None), \
+                 patch.object(vision.sys, "executable", executable), \
+                 patch.object(vision.os.path, "exists", return_value=True):
+                self.assertEqual(vision.parse_args([]).camera_python, expected)
+                # Webcam ou vídeo nunca recebem o auxiliar CSI.
+                self.assertIsNone(vision.parse_args(["--source", "0"]).camera_python)
 
     def test_invalid_camera_options_fail_before_database_creation(self):
         for options in (["--fps", "nan"], ["--fps", "0"], ["--width", "0"],
