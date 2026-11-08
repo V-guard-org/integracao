@@ -59,12 +59,15 @@ MAX_PENDING = 4 * MAX_LINE
 OPEN_DISCARD_S = 0.2
 # A UART a 115200 baud, 8N1, entrega no máximo 11 520 bytes por segundo.
 UART_BYTES_PER_S = 115200 // 10
-# Folga para os pacotes da USB e o buffer do chip (576 bytes no CP2102).
+# Saldo de bytes que pode chegar além da taxa, de uma vez ou em várias
+# leituras pequenas: os pacotes da USB e o buffer do chip (576 bytes no
+# CP2102). A rajada na Pi chega em pedaços de 32 a 64 bytes, então o saldo
+# se gasta, e não se renova a cada leitura.
 RATE_SLACK = 1024
 # Uma leitura deste tamanho pode ter enchido o buffer do tty (4096 bytes) e
 # deixado bytes no kernel: o leitor atrasou (um fsync lento do SQLite, por
-# exemplo). Só então o permitido que sobrou passa para a leitura seguinte,
-# até RATE_CARRY_MAX. Qualquer leitura menor esvaziou o kernel.
+# exemplo). Só então o saldo passa inteiro para a leitura seguinte, até
+# RATE_CARRY_MAX; nas outras, o que sobra de antes vale no máximo RATE_SLACK.
 FULL_READ = 4000
 RATE_CARRY_MAX = 3 * UART_BYTES_PER_S
 
@@ -242,7 +245,8 @@ class Esp32Link:
         """
         self._discard_until = None if now is None else now + OPEN_DISCARD_S
         self._rate_at = now         # hora da leitura anterior
-        self._carry = 0             # permitido que sobrou de uma leitura cheia
+        self._tokens = RATE_SLACK   # bytes que ainda cabem além da taxa
+        self._full_read = False     # a leitura anterior pode ter deixado bytes no kernel
         self._in_burst = False
         self._buffer = b""
         self._rejected = []         # motivos das recusadas antes da próxima válida
@@ -290,15 +294,17 @@ class Esp32Link:
 
     def _check_rate(self, size, now):
         """Mais bytes do que a UART entrega desde a leitura anterior: rajada do chip USB."""
-        allowed = RATE_SLACK + (now - self._rate_at) * UART_BYTES_PER_S + self._carry
+        before = self._tokens if self._full_read else min(self._tokens, RATE_SLACK)
+        allowed = min(RATE_CARRY_MAX, before + (now - self._rate_at) * UART_BYTES_PER_S)
         self._rate_at = now
-        self._carry = min(RATE_CARRY_MAX, allowed - size) if FULL_READ <= size <= allowed else 0
-        if size <= allowed:
+        self._full_read = size >= FULL_READ
+        self._tokens = allowed - size
+        if self._tokens >= 0:
             return
         if not self._in_burst:
             self.bursts += 1
-            log.info("rajada do chip USB: %d bytes acima do que a UART entrega; jogados fora",
-                     size - allowed)
+            log.info("rajada do chip USB: bytes acima do que a UART entrega; jogando fora")
+        self._tokens = 0
         self._in_burst = True
         self._discard_until = now + OPEN_DISCARD_S
         # A linha que vinha antes da rajada não se completa mais.

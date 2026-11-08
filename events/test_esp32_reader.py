@@ -205,6 +205,15 @@ class Contagens(unittest.TestCase):
         self.assertEqual((h.link.lost, h.link.corrupt), (10, 1))
         self.assertTrue(h.link.accepted)
 
+    def test_burst_in_small_reads(self):
+        # Na Pi, a rajada chega em pedaços de 32 bytes, um a cada ~0,1 ms.
+        h, esp32 = Harness(), Esp32()
+        h.link.port_opened(h.now)
+        self.paced(h, esp32, 1)
+        for _ in range(400):
+            h.feed(b"$O,134059577,-0.01,0.01,9.84*66\n", advance=0.0001)
+        self.assertEqual(h.link.bursts, 1)
+
     def test_backlog_after_stall_is_not_burst(self):
         # O leitor parou 2 s (um fsync lento): o kernel guardou ~6 KB, que
         # saem em leituras de até 4 KB, uma logo depois da outra.
