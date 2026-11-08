@@ -78,8 +78,8 @@ def summary(reader, manager, elapsed):
         "  taxas: %s" % (rates or "-"),
         "  lost (lacunas na seq): %d" % link.lost,
         "  corrupt (descartadas): %d" % link.corrupt,
-        "  texto do boot ignorado: %d linhas; descartados ao abrir a porta: %d bytes"
-        % (link.ignored, link.discarded_bytes),
+        "  texto do boot ignorado: %d linhas; jogados fora (abertura e rajadas): %d bytes;"
+        " rajadas do chip USB: %d" % (link.ignored, link.discarded_bytes, link.bursts),
         "  reinícios do ESP32: %d" % link.restarts,
         "  $H mandados: %d; $C mandados: %d" % (link.hours_sent, link.rates_sent),
         "  connected agora: %s" % reader.health()["connected"],

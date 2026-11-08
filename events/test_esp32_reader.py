@@ -176,12 +176,48 @@ class Contagens(unittest.TestCase):
         block = b"$O,134059577,-0.01,0.01,9.84*66\n"   # 32 bytes, como na bancada
         burst = esp32.accel(seq=40) + block * 300
         h.feed(burst, advance=0.05)
-        h.feed(block * 10, advance=0.1)
+        # Ainda acima da taxa da UART: a rajada estica o descarte por mais 0,2 s.
+        h.feed(block * 200, advance=0.1)
+        h.feed(block, advance=0.15)
         h.feed(b",9.81*48\n" + esp32.accel(seq=60), advance=0.1)
         h.feed(esp32.accel(), advance=0.02)
         self.assertEqual((h.link.corrupt, h.link.lost, h.link.ignored), (0, 0, 1))
-        self.assertEqual(h.link.discarded_bytes, len(burst) + len(block) * 10)
+        self.assertEqual(h.link.discarded_bytes, len(burst) + len(block) * 201)
+        self.assertEqual(h.link.bursts, 1)
         self.assertEqual(h.link.counts, {"A": 2})
+
+    def paced(self, h, esp32, seconds):
+        """O ESP32 de verdade: um $A a cada 20 ms, ~2 KB/s."""
+        for _ in range(int(seconds / 0.02)):
+            h.feed(esp32.accel(), advance=0.02)
+
+    def test_burst_mid_stream(self):
+        h, esp32 = Harness(), Esp32()
+        h.link.port_opened(h.now)
+        self.paced(h, esp32, 1)
+        h.feed(b"$A,99")   # linha pela metade quando a rajada chega
+        h.feed(b"$O,134059577,-0.01,0.01,9.84*66\n" * 200, advance=0.02)
+        esp32.seq += 10    # as linhas que o ESP32 mandou durante o descarte
+        h.feed(b"0.12,-0.05,9.79*6D\n", advance=0.25)
+        self.paced(h, esp32, 0.2)
+        self.assertEqual(h.link.bursts, 1)
+        # As 10 linhas perdidas aparecem na seq; o pedaço depois do descarte é corrompido.
+        self.assertEqual((h.link.lost, h.link.corrupt), (10, 1))
+        self.assertTrue(h.link.accepted)
+
+    def test_backlog_after_stall_is_not_burst(self):
+        # O leitor parou 2 s (um fsync lento): o kernel guardou ~6 KB, que
+        # saem em leituras de até 4 KB, uma logo depois da outra.
+        h, esp32 = Harness(), Esp32()
+        h.link.port_opened(h.now)
+        self.paced(h, esp32, 1)
+        discarded = h.link.discarded_bytes   # o descarte da abertura
+        backlog = b"".join(esp32.accel() for _ in range(150))
+        h.feed(backlog[:4095], advance=2.0)
+        h.feed(backlog[4095:], advance=0.001)
+        self.paced(h, esp32, 0.2)
+        self.assertEqual((h.link.bursts, h.link.lost, h.link.corrupt), (0, 0, 0))
+        self.assertEqual(h.link.discarded_bytes, discarded)
 
     def test_line_without_newline_grows_too_much(self):
         h, esp32 = Harness(), Esp32()

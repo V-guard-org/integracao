@@ -47,12 +47,26 @@ MAX_LINE = 120
 # Bytes sem \n que se acumulam antes de virarem uma linha corrompida.
 MAX_PENDING = 4 * MAX_LINE
 
-# O que chega nos primeiros instantes depois de abrir a porta é descartado.
-# Na bancada de 08/11, o CP2102 entregou, em ~60% das aberturas, uma rajada
-# de até ~15 KB em 50 ms: blocos de 32 bytes repetidos, com pedaços de
-# linhas velhas. Depois dela, o fluxo é normal. Ler e jogar fora os
-# primeiros 0,2 s acabou com a rajada (24 aberturas, nenhuma recusada).
+# Rajada do chip USB. Na bancada de 08/11, o CP2102 da placa entregou, em
+# ~60% das aberturas da porta, blocos de 32 bytes repetidos, com pedaços de
+# linhas velhas: de ~15 KB em 50 ms (notebook) a ~80 KB em 0,2 s e mais
+# ~1 s de lixo (Pi). Isso é mais do que a UART consegue entregar, então o
+# leitor joga fora:
+# - os primeiros OPEN_DISCARD_S depois de abrir a porta (as linhas velhas
+#   que ficaram no buffer do chip com a porta fechada);
+# - a leitura que passa do que a UART entrega no tempo desde a anterior, e
+#   mais OPEN_DISCARD_S depois dela.
 OPEN_DISCARD_S = 0.2
+# A UART a 115200 baud, 8N1, entrega no máximo 11 520 bytes por segundo.
+UART_BYTES_PER_S = 115200 // 10
+# Folga para os pacotes da USB e o buffer do chip (576 bytes no CP2102).
+RATE_SLACK = 1024
+# Uma leitura deste tamanho pode ter enchido o buffer do tty (4096 bytes) e
+# deixado bytes no kernel: o leitor atrasou (um fsync lento do SQLite, por
+# exemplo). Só então o permitido que sobrou passa para a leitura seguinte,
+# até RATE_CARRY_MAX. Qualquer leitura menor esvaziou o kernel.
+FULL_READ = 4000
+RATE_CARRY_MAX = 3 * UART_BYTES_PER_S
 
 # As amostras só são aceitas depois desta quantidade de linhas válidas
 # seguidas, contada de novo ao abrir a porta e no reinício do ESP32.
@@ -193,7 +207,8 @@ class Esp32Link:
         self.corrupt = 0
         # Para a ferramenta de bancada e o log.
         self.ignored = 0            # texto do boot, fora do protocolo
-        self.discarded_bytes = 0    # jogados fora logo depois de abrir a porta
+        self.discarded_bytes = 0    # jogados fora na abertura e nas rajadas
+        self.bursts = 0             # leituras acima do que a UART entrega
         self.restarts = 0
         self.hours_sent = 0
         self.rates_sent = 0
@@ -220,11 +235,15 @@ class Esp32Link:
 
     def port_opened(self, now):
         """
-        A porta abriu em `now` (None: sem o descarte da abertura). O que chegar
-        nos primeiros OPEN_DISCARD_S é jogado fora, e o que chegar antes da
+        A porta abriu em `now` (None: sem o descarte da abertura nem a conta das
+        rajadas, para os testes que não simulam o tempo). O que chegar nos
+        primeiros OPEN_DISCARD_S é jogado fora, e o que chegar antes da
         primeira linha válida é boot.
         """
         self._discard_until = None if now is None else now + OPEN_DISCARD_S
+        self._rate_at = now         # hora da leitura anterior
+        self._carry = 0             # permitido que sobrou de uma leitura cheia
+        self._in_burst = False
         self._buffer = b""
         self._rejected = []         # motivos das recusadas antes da próxima válida
         self._last_seq = None
@@ -250,9 +269,13 @@ class Esp32Link:
 
     def feed(self, data, now, wall):
         """Bytes lidos (pode ser b"") viram amostras; devolve o que mandar ao ESP32."""
+        if self._rate_at is not None:
+            self._check_rate(len(data), now)
         if self._discard_until is not None and now < self._discard_until:
             self.discarded_bytes += len(data)
             data = b""
+        else:
+            self._in_burst = False
         self._buffer += data
         *lines, self._buffer = self._buffer.split(b"\n")
         for raw in lines:
@@ -264,6 +287,22 @@ class Esp32Link:
         if self._present and not self.connected(now):
             self._lose(wall, "nenhuma linha válida em %g s" % CONNECTED_S)
         return self._outgoing(now, wall)
+
+    def _check_rate(self, size, now):
+        """Mais bytes do que a UART entrega desde a leitura anterior: rajada do chip USB."""
+        allowed = RATE_SLACK + (now - self._rate_at) * UART_BYTES_PER_S + self._carry
+        self._rate_at = now
+        self._carry = min(RATE_CARRY_MAX, allowed - size) if FULL_READ <= size <= allowed else 0
+        if size <= allowed:
+            return
+        if not self._in_burst:
+            self.bursts += 1
+            log.info("rajada do chip USB: %d bytes acima do que a UART entrega; jogados fora",
+                     size - allowed)
+        self._in_burst = True
+        self._discard_until = now + OPEN_DISCARD_S
+        # A linha que vinha antes da rajada não se completa mais.
+        self._buffer = b""
 
     def _reset_session(self):
         """Porta aberta ou ESP32 reiniciado: a validação recomeça."""
