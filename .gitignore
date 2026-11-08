@@ -35,7 +35,6 @@ env/
 .idea/
 *.swp
 .claude/
-CLAUDE.md
 graphify-out/
 .DS_Store
 Thumbs.db
