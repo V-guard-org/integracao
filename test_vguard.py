@@ -11,7 +11,7 @@ import vguard
 class ApplicationLifecycle(unittest.TestCase):
     def test_calibration_options_reach_pipeline(self):
         with patch.object(vguard, "EventManager"), patch.object(vguard, "VisionPipeline") as pipeline:
-            vguard.run(["--no-uart", "--no-gps", "--no-sync", "--calibrate",
+            vguard.run(["--no-esp32", "--no-gps", "--no-sync", "--calibrate",
                         "--calibration-file", "/tmp/calibration-driver.json"])
         self.assertTrue(pipeline.call_args.kwargs['calibrate'])
         self.assertEqual(pipeline.call_args.kwargs['calibration_path'], Path('/tmp/calibration-driver.json'))
@@ -19,7 +19,7 @@ class ApplicationLifecycle(unittest.TestCase):
     def test_csi_options_reach_integrated_pipeline(self):
         with patch.object(vguard, "EventManager"), \
              patch.object(vguard, "VisionPipeline") as pipeline:
-            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync", "--infrared",
+            vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync", "--infrared",
                         "--camera-num", "1", "--fps", "20",
                         "--camera-python", "/usr/bin/python3"])
         options = pipeline.call_args.kwargs
@@ -38,44 +38,51 @@ class ApplicationLifecycle(unittest.TestCase):
                     vguard.run(options)
                 manager.assert_not_called()
 
-    def test_camera_only_never_constructs_uart_or_sync(self):
+    def test_camera_only_never_constructs_esp32_or_sync(self):
         manager = Mock()
         with patch.object(vguard, "EventManager", return_value=manager), \
-             patch.object(vguard, "UartReader") as uart, \
+             patch.object(vguard, "Esp32Reader") as esp32, \
              patch.object(vguard, "GpsReader") as gps, \
              patch.object(vguard, "Sync") as sync, \
              patch.object(vguard, "VisionPipeline") as pipeline:
             pipeline.return_value.run.return_value = 1
-            self.assertEqual(vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync", "--max-frames", "10"]), 1)
-            uart.assert_not_called()
+            self.assertEqual(vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync", "--max-frames", "10"]), 1)
+            esp32.assert_not_called()
             gps.assert_not_called()
             sync.assert_not_called()
             self.assertIs(pipeline.call_args.kwargs["event_manager"], manager)
             self.assertEqual(pipeline.call_args.kwargs["max_frames"], 10)
             manager.close.assert_called_once()
 
+    def test_old_no_uart_option_still_skips_esp32(self):
+        with patch.object(vguard, "EventManager"), \
+             patch.object(vguard, "Esp32Reader") as esp32, \
+             patch.object(vguard, "VisionPipeline"):
+            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync"])
+        esp32.assert_not_called()
+
     def test_initialization_failure_stops_workers_before_closing_database(self):
         order = []
         manager, reader, gps, sync = Mock(), Mock(), Mock(), Mock()
         manager.close.side_effect = lambda: order.append("database")
-        reader.stop.side_effect = lambda: order.append("uart")
+        reader.stop.side_effect = lambda: order.append("esp32")
         gps.stop.side_effect = lambda: order.append("gps")
         sync.stop.side_effect = lambda: order.append("sync")
         with patch.object(vguard, "EventManager", return_value=manager), \
-             patch.object(vguard, "UartReader", return_value=reader), \
+             patch.object(vguard, "Esp32Reader", return_value=reader), \
              patch.object(vguard, "GpsReader", return_value=gps), \
              patch.object(vguard, "Sync", return_value=sync), \
              patch.object(vguard, "VisionPipeline", side_effect=RuntimeError("model unavailable")):
             with self.assertRaisesRegex(RuntimeError, "model unavailable"):
                 vguard.run(["--headless"])
-        self.assertEqual(order, ["uart", "gps", "sync", "database"])
+        self.assertEqual(order, ["esp32", "gps", "sync", "database"])
 
     def test_interrupt_closes_database(self):
         manager = Mock()
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "VisionPipeline") as pipeline:
             pipeline.return_value.run.side_effect = KeyboardInterrupt
-            vguard.run(["--headless", "--no-uart", "--no-gps", "--no-sync"])
+            vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync"])
             manager.close.assert_called_once()
 
     def test_landmarker_failure_releases_camera(self):

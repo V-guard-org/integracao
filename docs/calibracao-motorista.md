@@ -55,7 +55,7 @@ detectadas automaticamente. Para testar sem IR, use o comando manual abaixo
 sem `--infrared`, com outro nome de perfil e nova calibração.
 
 ```bash
-QT_QPA_PLATFORM=xcb VGUARD_DATA=../dados-teste-gui .venv/bin/python -B vguard.py --camera-python /usr/bin/python3 --infrared --no-uart --no-gps --no-sync --calibration-file ../dados-teste-gui/calibration-driver.json --calibrate
+QT_QPA_PLATFORM=xcb VGUARD_DATA=../dados-teste-gui .venv/bin/python -B vguard.py --camera-python /usr/bin/python3 --infrared --no-esp32 --no-gps --no-sync --calibration-file ../dados-teste-gui/calibration-driver.json --calibrate
 ```
 
 ## O que mudou na decisão
