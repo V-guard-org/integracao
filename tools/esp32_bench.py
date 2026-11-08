@@ -5,7 +5,7 @@ biblioteca padrão, como o events/.
 
     python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 600
     python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 30 --obd-hz 5
-    python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 20 --no-clock
+    python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 20 --no-clock --reset
 
 O ESP32 com o firmware esp32-sim (firmware_esp32: pio run -e esp32-sim -t
 upload) manda a viagem simulada. O log mostra o $B, o $L, o $P, as mudanças
@@ -17,10 +17,13 @@ válida chegou.
 """
 
 import argparse
+import fcntl
 import logging
 import os
+import struct
 import sys
 import tempfile
+import termios
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +32,24 @@ sys.path.insert(0, os.path.join(HERE, "..", "events"))
 import esp32_reader                                      # noqa: E402
 from esp32_reader import OBD_FIELDS, Esp32Reader         # noqa: E402
 from event_manager import EventManager                   # noqa: E402
+from serial_port import open_port                        # noqa: E402
+
+
+def reset_esp32(port):
+    """
+    Reinicia o ESP32 pelo EN, pulsando o RTS, como o esptool e o --reiniciar da
+    bancada.py do firmware_esp32: o circuito da DevKit leva o EN a nível baixo.
+    """
+    fd = open_port(port, esp32_reader.BAUD)
+    try:
+        def lines(request, bits):
+            fcntl.ioctl(fd, request, struct.pack("I", bits))
+        lines(termios.TIOCMBIC, termios.TIOCM_DTR)
+        lines(termios.TIOCMBIS, termios.TIOCM_RTS)
+        time.sleep(0.1)
+        lines(termios.TIOCMBIC, termios.TIOCM_RTS)
+    finally:
+        os.close(fd)
 
 
 def rate(link, kind):
@@ -80,6 +101,8 @@ def main():
                         help="taxa do OBD pedida pelo $C (padrão: VGUARD_OBD_HZ ou 12.5)")
     parser.add_argument("--no-clock", action="store_true",
                         help="finge a hora da Pi sem sincronizar: nenhum $H")
+    parser.add_argument("--reset", action="store_true",
+                        help="reinicia o ESP32 pelo EN (RTS) antes de ler, para ver o $B e a ESPERA")
     parser.add_argument("--data-dir", help="pasta nova para o SQLite (padrão: uma temporária)")
     args = parser.parse_args()
 
@@ -91,6 +114,9 @@ def main():
     manager = EventManager(data_dir)
     clock_ok = (lambda: False) if args.no_clock else esp32_reader.clock_synchronized
     reader = Esp32Reader(manager, args.port, clock_ok=clock_ok, obd_hz=args.obd_hz)
+    if args.reset:
+        logging.info("reiniciando o ESP32 pelo EN")
+        reset_esp32(args.port)
     logging.info("lendo %s por %g s; dados em %s", args.port, args.seconds, data_dir)
     start = time.monotonic()
     reader.start()

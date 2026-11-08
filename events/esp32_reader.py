@@ -422,10 +422,13 @@ class Esp32Link:
 
     def _outgoing(self, now, wall):
         out = b""
-        if self._last_hour is not None and now - self._last_hour >= HOUR_INTERVAL_S:
+        periodic = self._last_hour is not None and now - self._last_hour >= HOUR_INTERVAL_S
+        if periodic:
             self._hour_wanted = True
         # Só para um ESP32 presente: o $H mandado para a porta muda se perderia.
         if self._hour_wanted and self.connected(now) and self._clock(now):
+            # O de 60 em 60 s não vai ao log, para não encher o cartão.
+            (log.debug if periodic else log.info)("mandando $H")
             out += frame("H,%d" % int(wall * 1000))
             self._hour_wanted = False
             self._last_hour = now
