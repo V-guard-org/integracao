@@ -32,7 +32,7 @@ def vcgencmd(answers):
     return run
 
 
-def missing(args, **kwargs):
+def no_vcgencmd(args, **kwargs):
     raise FileNotFoundError(args[0])
 
 
@@ -46,10 +46,10 @@ class ReadSensorsTest(unittest.TestCase):
             thermal = os.path.join(directory, "temp")
             with open(thermal, "w") as file:
                 file.write("61250\n")
-            self.assertEqual(read_sensors(run=missing, thermal=thermal), (61.25, None))
+            self.assertEqual(read_sensors(run=no_vcgencmd, thermal=thermal), (61.25, None))
 
     def test_without_any_source_both_are_none(self):
-        self.assertEqual(read_sensors(run=missing, thermal="/nao/existe"), (None, None))
+        self.assertEqual(read_sensors(run=no_vcgencmd, thermal="/nao/existe"), (None, None))
 
     def test_garbled_vcgencmd_answer_counts_as_missing(self):
         run = vcgencmd({"measure_temp": "temp=?'C", "get_throttled": "throttled=zz"})

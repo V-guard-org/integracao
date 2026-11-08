@@ -9,15 +9,15 @@ se testa sem câmera.
     fps = meter.frame(time.monotonic())   # None, ou a média ao fechar 10 s
 """
 
-# Período da média, em segundos. O log e o vision_fps da saúde usam este valor.
+# Período da média, em segundos: a linha do log e o vision_fps. A saúde
+# (ticket 5) manda a média do último minuto, os 6 últimos valores.
 PERIOD_S = 10.0
 
 
 class FpsMeter:
     """Média de quadros por segundo a cada PERIOD_S."""
 
-    def __init__(self, period=PERIOD_S):
-        self.period = period
+    def __init__(self):
         self._start = None
         self._frames = 0
         # Para a média da execução inteira (o resumo ao encerrar).
@@ -37,7 +37,7 @@ class FpsMeter:
         self._total += 1
         self._last = now
         elapsed = now - self._start
-        if elapsed < self.period:
+        if elapsed < PERIOD_S:
             return None
         fps = self._frames / elapsed
         self._start, self._frames = now, 0
