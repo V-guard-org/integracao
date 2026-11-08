@@ -39,6 +39,8 @@ As duas partes não se importam entre si. Quem as conecta é só o `vguard.py`.
    em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
 6. **Sync** (thread) envia a cada 60 s o que está pendente: metadados, telemetria e fotos por 4G ou Wi-Fi
    (as fotos vão por último e, se falharem, atrasam só a si mesmas). Um item só é marcado como enviado depois do 2xx do backend (RF22).
+7. **PiMonitor** (thread) lê a temperatura e o `throttled` da Pi a cada 10 s e os escreve no log
+   ([o que aparece no log](#o-que-aparece-no-log)). Os valores ficam guardados para a saúde.
 
 ### O contrato entre os dois lados
 
@@ -100,6 +102,34 @@ O ambiente já validado está em `/home/vguard/vguard/compat/mediapipe-0.10.18-p
 Não aplique `vision/requirements.txt` a esse ambiente: MediaPipe 0.10.18 exige NumPy <2.
 Não instale simultaneamente `opencv-python` e `opencv-contrib-python`.
 
+O MediaPipe 0.10.18 é a última versão da série 0.10 com pacote para Linux ARM 64 bits, e só
+para o Python 3.9 a 3.12; o Debian 13 traz o 3.13. Por isso a visão roda num venv 3.11, montado
+pelo [`uv`](https://docs.astral.sh/uv/) sem sudo (validado em 08/11/2026, Pi 4B Rev 1.5):
+
+```bash
+# 1. uv em ~/.local/bin (o ~/.profile do Debian já põe essa pasta no PATH)
+B=https://github.com/astral-sh/uv/releases/download/0.12.21
+curl -fsSLO $B/uv-aarch64-unknown-linux-gnu.tar.gz
+curl -fsSLO $B/uv-aarch64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c uv-aarch64-unknown-linux-gnu.tar.gz.sha256
+tar xzf uv-aarch64-unknown-linux-gnu.tar.gz
+install -D -m 755 -t ~/.local/bin uv-aarch64-unknown-linux-gnu/uv uv-aarch64-unknown-linux-gnu/uvx
+
+# 2. Python 3.11 e o venv, só com pacotes prontos (nada é compilado na Pi)
+V=/home/vguard/vguard/compat/mediapipe-0.10.18-py311/.venv
+uv python install 3.11.16
+uv venv --python 3.11.16 $V
+cd /home/vguard/vguard/integracao
+uv pip install --python $V/bin/python --only-binary :all: -r requirements-pi4-py311.txt
+
+# 3. O link que o tools/test_camera_gui.sh usa, e o modelo (fica fora do git)
+ln -s $V .venv
+.venv/bin/python vision/scripts/download_model.py
+```
+
+O `requirements-pi4-py311.txt` tem a lista completa do venv que funcionou na Pi (`uv pip freeze`).
+Na Pi 4B, o `grep Features /proc/cpuinfo` mostra `fp asimd evtstrm crc32 cpuid`, sem `aes`.
+
 Com o modelo em `vision/models/face_landmarker.task`, execute:
 
 ```bash
@@ -122,6 +152,34 @@ se houver envio em andamento, o encerramento pode esperar o timeout da conexão.
 
 Sem o ESP32 ou o GPS conectados, o leitor correspondente registra um aviso e tenta de novo a
 cada 2 s. A visão e a gravação de eventos continuam funcionando.
+
+### O que aparece no log
+
+O `vguard.py` escreve no log (o stderr) a partir do nível INFO. A cada 10 s, também com `--headless`:
+
+```
+2026-11-08 17:31:31,076 INFO pi: Pi: 58.4 °C, throttled 0x0
+2026-11-08 17:31:31,130 INFO vision: visão: 13.9 FPS em 10 s
+```
+
+- **`visão`:** a média de quadros processados por segundo nos últimos 10 s (`vision/fps.py`).
+- **`Pi`** (`events/pi_monitor.py`): o `vcgencmd measure_temp` e o `vcgencmd get_throttled`.
+  Sem o `vcgencmd`, a temperatura vem de `/sys/class/thermal/thermal_zone0/temp` e o `throttled`
+  fica sem valor, com um aviso uma vez só. Avisos:
+  - acima de 75 °C, um por episódio, que termina quando a temperatura volta abaixo de 75 °C
+    (a Pi 4 reduz o clock a partir de 80 °C);
+  - uma linha por mudança dos bits de "agora" do `get_throttled`: `undervoltage` (subtensão),
+    `freq_capped` (frequência limitada), `throttling` (redução de clock) e `soft_temp_limit`
+    (limite de temperatura). Os bits 16 a 19, "desde o boot", só aparecem no valor da linha de 10 s.
+- **Ao encerrar** (SIGTERM, Ctrl+C ou `--max-frames`), uma linha de resumo:
+
+```
+INFO vguard: resumo: visão 13.8 FPS em média; eventos: fadiga 1, distracao 1; Pi até 61.2 °C, throttled sem avisos
+```
+
+Para guardar o log de uma execução com `timeout`, redirecione para um arquivo
+(`> bancada.log 2>&1`). Sem o `--foreground`, o `timeout` manda o sinal ao grupo de processos
+inteiro, e um `| tee` morreria junto, antes de escrever o resumo.
 
 ### Variáveis de ambiente
 
@@ -178,13 +236,13 @@ e os estados de sincronização separados: `meta_synced` e `photo_synced` (RF18)
 Cada arquivo de teste roda sozinho. A partir de `integracao/`:
 
 ```bash
-(cd vision && python3 test_metrics.py && python3 test_detector.py && python3 test_pipeline_integration.py)
+(cd vision && python3 test_metrics.py && python3 test_detector.py && python3 test_pipeline_integration.py && python3 test_fps.py)
 python3 -B vision/test_capture.py
 python3 -B vision/test_calibration.py
 ```
 
 ```bash
-(cd events && python3 test_event_manager.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py)
+(cd events && python3 test_event_manager.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py && python3 test_pi_monitor.py)
 python3 -B test_vguard.py
 ```
 
