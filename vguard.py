@@ -5,8 +5,10 @@ V-GUARD — Processo único da Raspberry Pi: visão + gerenciador de eventos.
     ESP32  --> Esp32Reader    --update()-------->      |
     GNSS   --> GpsReader      --update()-------->      |
                                      Sync <--pending_*/ack_*--+
+    Pi     --> PiMonitor: temperatura e throttled no log, a cada 10 s
 
-A visão roda na thread principal (cv2.imshow exige); ESP32, GPS e Sync em threads.
+A visão roda na thread principal (cv2.imshow exige); ESP32, GPS, Sync e o
+PiMonitor em threads. Ao encerrar, uma linha de resumo vai ao log.
 
     python3 vguard.py --headless              # na Pi
     python3 vguard.py --source video.mp4      # no notebook
@@ -25,8 +27,11 @@ sys.path[:0] = [os.path.join(HERE, "events"), os.path.join(HERE, "vision")]
 from esp32_reader import Esp32Reader
 from event_manager import EventManager
 from gps_reader import GpsReader
+from pi_monitor import PiMonitor
 from sync import Sync
 from main import VisionPipeline, parse_args  # vision/main.py
+
+log = logging.getLogger("vguard")
 
 
 def run(argv=None):
@@ -46,8 +51,11 @@ def run(argv=None):
     reader = None
     gps = None
     sync = None
+    pipeline = None
+    monitor = PiMonitor()
 
     try:
+        monitor.start()
         if not args.no_esp32:
             reader = Esp32Reader(manager)
             reader.start()
@@ -57,7 +65,7 @@ def run(argv=None):
         if not args.no_sync:
             sync = Sync(manager)
             sync.start()
-        return VisionPipeline(
+        pipeline = VisionPipeline(
             event_manager=manager,
             headless=args.headless,
             source=int(args.source) if args.source.isdigit() else args.source,
@@ -70,17 +78,18 @@ def run(argv=None):
             camera_python=args.camera_python,
             calibration_path=args.calibration_file,
             calibrate=args.calibrate,
-        ).run()
+        )
+        return pipeline.run()
     except KeyboardInterrupt:
-        logging.info("encerramento solicitado")
+        log.info("encerramento solicitado")
     finally:
-        if reader is not None:
-            reader.stop()
-        if gps is not None:
-            gps.stop()
-        if sync is not None:
-            sync.stop()
+        for worker in (reader, gps, sync, monitor):
+            if worker is not None:
+                worker.stop()
         manager.close()
+        if pipeline is not None:
+            # FPS médio e eventos por tipo; temperatura máxima e avisos do throttled.
+            log.info("resumo: %s; %s", pipeline.summary(), monitor.summary())
 
 
 def _request_stop(signum, frame):
@@ -88,5 +97,6 @@ def _request_stop(signum, frame):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     signal.signal(signal.SIGTERM, _request_stop)
     run()

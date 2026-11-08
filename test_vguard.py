@@ -9,6 +9,12 @@ import vguard
 
 
 class ApplicationLifecycle(unittest.TestCase):
+    def setUp(self):
+        # O monitor de verdade chamaria o vcgencmd do notebook.
+        patcher = patch.object(vguard, "PiMonitor")
+        self.monitor = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_calibration_options_reach_pipeline(self):
         with patch.object(vguard, "EventManager"), patch.object(vguard, "VisionPipeline") as pipeline:
             vguard.run(["--no-esp32", "--no-gps", "--no-sync", "--calibrate",
@@ -91,6 +97,7 @@ class ApplicationLifecycle(unittest.TestCase):
         reader.stop.side_effect = lambda: order.append("esp32")
         gps.stop.side_effect = lambda: order.append("gps")
         sync.stop.side_effect = lambda: order.append("sync")
+        self.monitor.return_value.stop.side_effect = lambda: order.append("pi")
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "Esp32Reader", return_value=reader), \
              patch.object(vguard, "GpsReader", return_value=gps), \
@@ -98,7 +105,27 @@ class ApplicationLifecycle(unittest.TestCase):
              patch.object(vguard, "VisionPipeline", side_effect=RuntimeError("model unavailable")):
             with self.assertRaisesRegex(RuntimeError, "model unavailable"):
                 vguard.run(["--headless"])
-        self.assertEqual(order, ["esp32", "gps", "sync", "database"])
+        self.assertEqual(order, ["esp32", "gps", "sync", "pi", "database"])
+        self.monitor.return_value.start.assert_called_once()
+
+    def test_camera_only_still_monitors_the_pi(self):
+        with patch.object(vguard, "EventManager"), patch.object(vguard, "VisionPipeline"):
+            vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync"])
+        self.monitor.return_value.start.assert_called_once()
+        self.monitor.return_value.stop.assert_called_once()
+
+    def test_shutdown_joins_the_vision_and_pi_summaries_in_one_line(self):
+        self.monitor.return_value.summary.return_value = "Pi até 61.2 °C, throttled sem avisos"
+        for name, failure in (("--max-frames", None), ("Ctrl+C ou SIGTERM", KeyboardInterrupt)):
+            with self.subTest(name), \
+                 patch.object(vguard, "EventManager"), \
+                 patch.object(vguard, "VisionPipeline") as pipeline, \
+                 self.assertLogs("vguard", level="INFO") as logs:
+                pipeline.return_value.run.side_effect = failure
+                pipeline.return_value.summary.return_value = "visão 13.8 FPS em média; eventos: nenhum"
+                vguard.run(["--headless", "--no-esp32", "--no-gps", "--no-sync"])
+            self.assertIn("INFO:vguard:resumo: visão 13.8 FPS em média; eventos: nenhum; "
+                          "Pi até 61.2 °C, throttled sem avisos", logs.output)
 
     def test_interrupt_closes_database(self):
         manager = Mock()

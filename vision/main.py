@@ -13,8 +13,10 @@ Ponto de entrada: ../vguard.py (este modulo so fornece VisionPipeline e parse_ar
 """
 
 import argparse
+from collections import Counter
 from dataclasses import replace
 import importlib.util
+import logging
 import math
 import os
 import sys
@@ -44,8 +46,11 @@ from config import (
 )
 from detector import DetectionResult, DriverStateDetector
 from capture import Capture, is_webcam, open_capture
+from fps import PERIOD_S as FPS_PERIOD_S, FpsMeter
 from calibration import CalibrationSession
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
+
+log = logging.getLogger("vision")
 
 
 # ==============================================================================
@@ -173,6 +178,16 @@ class VisionPipeline:
 
         # Contador de eventos disparados durante a execucao
         self.events_recorded_count = 0
+        self._events_by_type: Counter = Counter()
+
+        # FPS da visão: a média dos últimos 10 s, que a saúde lê (ticket 5).
+        self.vision_fps = 0.0
+        self._fps_meter = FpsMeter()
+
+    def summary(self) -> str:
+        """A parte da visão no resumo ao encerrar: FPS médio e eventos gravados por tipo."""
+        events = ", ".join(f"{kind} {count}" for kind, count in self._events_by_type.items())
+        return f"visão {self._fps_meter.average:.1f} FPS em média; eventos: {events or 'nenhum'}"
 
     def _init_landmarker(self) -> vision.FaceLandmarker:
         """Inicializa e configura o FaceLandmarker do MediaPipe."""
@@ -236,6 +251,12 @@ class VisionPipeline:
                     fps = 1.0 / delta_t
                 prev_time = now_mono
 
+                # Média de 10 s no log, também sem tela
+                period_fps = self._fps_meter.frame(now_mono)
+                if period_fps is not None:
+                    self.vision_fps = period_fps
+                    log.info("visão: %.1f FPS em %g s", period_fps, FPS_PERIOD_S)
+
                 # Relogio rigorosamente crescente em milissegundos para o MediaPipe VIDEO mode
                 timestamp_ms = max(last_timestamp_ms + 1, int(now_mono * 1000))
                 last_timestamp_ms = timestamp_ms
@@ -292,6 +313,7 @@ class VisionPipeline:
                             print(f"[ERRO] Falha ao registrar evento no EventManager: {e}", file=sys.stderr)
                         if event_id is not None:
                             self.events_recorded_count += 1
+                            self._events_by_type[detection.event_type] += 1
                             print(
                                 f"[EVENTO REGISTRADO] ID={event_id} Tipo='{detection.event_type}' "
                                 f"Score={event_score} Tamanho={len(jpeg_bytes)}B"
