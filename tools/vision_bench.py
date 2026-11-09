@@ -252,8 +252,8 @@ def status_lines(script, status):
     results = ["%s: %s" % (script.label(name), script.results.get(name, "falta"))
                for name in script.expected()]
     outside = ", ".join(event for event, _ in script.outside) or "nenhum"
-    vision = "Visao %s FPS   Pi %s   throttled %s" % (
-        "carregando" if status["fps"] is None else "%.1f" % status["fps"],
+    vision = "Visao %s   Pi %s   throttled %s" % (
+        "carregando..." if status["fps"] is None else "%.1f FPS" % status["fps"],
         "-" if status["temp"] is None else "%.1f C" % status["temp"],
         status["throttled"] or "-")
     return ["   ".join(results), "Eventos fora do pedido: %s" % outside, vision]
