@@ -186,6 +186,23 @@ class VisionProcessTests(unittest.TestCase):
         self.assertFalse(vision.wait(0))
         self.assertEqual(self.attempts(), 1)
 
+    def test_sigterm_to_the_whole_group_is_not_a_fall(self):
+        # timeout e systemd mandam o SIGTERM ao grupo: a visão sai um pouco antes do stop()
+        with self.assertLogs("vision.process", level="INFO") as logs:
+            vision = self.start("pronto,hang")
+            self.assertTrue(wait_until(lambda: vision._running))
+            vision._child.send_signal(signal.SIGTERM)
+            time.sleep(0.3)
+            vision.stop()
+        self.assertFalse(any("visão caiu" in line for line in logs.output), logs.output)
+        self.assertEqual(self.attempts(), 1)
+
+    def test_sigterm_from_outside_still_counts_as_a_fall(self):
+        with self.assertLogs("vision.process", level="INFO") as logs:
+            vision = self.start("exit:143|pronto,hang")
+            self.assertTrue(wait_until(lambda: self.attempts() == 2 and vision._running))
+        self.assertIn("WARNING:vision.process:visão caiu (código 143); nova tentativa em 0.05 s", logs.output)
+
     def test_stop_during_the_wait_between_attempts_is_quick(self):
         vision = self.start("exit:1", backoff=Backoff(first=10.0, limit=60.0))
         self.assertTrue(wait_until(lambda: vision._down_since is not None))

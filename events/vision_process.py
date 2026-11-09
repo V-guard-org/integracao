@@ -42,6 +42,9 @@ VISION_SCRIPT = os.path.join(REPO, "vision", "main.py")
 DEFAULT_VISION_PYTHON = "/home/vguard/vguard/compat/mediapipe-0.10.18-py311/.venv/bin/python"
 FPS_TIMEOUT_S = 30.0
 STOP_TIMEOUT_S = 5.0
+# A visão saiu pelo SIGTERM (143): espera-se este tanto pelo encerramento do
+# principal antes de contar como queda (o SIGTERM pode ter ido ao grupo todo).
+TERM_GRACE_S = 1.0
 
 
 def vision_python(environ=os.environ):
@@ -206,6 +209,10 @@ class VisionProcess:
             if code == protocol.EXIT_OK:
                 log.info("visão terminou normalmente (código 0): o programa encerra")
                 self._ended.set()
+                return
+            if code == protocol.EXIT_TERMINATED and self._stop.wait(TERM_GRACE_S):
+                # O SIGTERM foi ao grupo todo (timeout, systemd): a visão saiu um
+                # instante antes de o principal começar a encerrar. Não é queda.
                 return
             if code == protocol.EXIT_CONFIG or self._version_error:
                 self.config_error = self.config_error or f"código {code}"
