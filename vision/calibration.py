@@ -363,11 +363,11 @@ class CalibrationSession:
             return Prompt(POSE_STEP, ("Continue olhando a estrada,", "com a cabeca parada."),
                           progress=self._progress(now), keys="C: recomecar")
         if state == "error":
-            return Prompt(POSE_STEP, wrap(self.error) + ("Aperte C e olhe para a estrada.",),
+            return Prompt(POSE_STEP, wrap(self.error + ".") + ("Aperte C e olhe para a estrada.",),
                           keys="C: repetir   Q: sair", tone="error")
         if state == "wait_closed":
             if self.error:
-                return Prompt(EYES_STEP, wrap(self.error) + ("Meca de novo ou salve so a postura.",),
+                return Prompt(EYES_STEP, wrap(self.error + ".") + ("Meca de novo ou salve so a postura.",),
                               keys="F: medir de novo   S: salvar so a postura", tone="error")
             return Prompt(EYES_STEP, ("Postura medida.", "Agora pode medir os olhos fechados."),
                           keys="F: medir os olhos   S: pular e salvar", tone="ok")
@@ -492,7 +492,7 @@ class GuidedCheck:
             if self.passed:
                 return Prompt("Conferencia concluida", ("Tudo certo: lado, bocejo e estrada.",),
                               results=self.results_line(), keys=done_keys, tone="ok")
-            return Prompt("Conferencia concluida", ("Alguma prova falhou.", "Recalibre (C) ou confira de novo (V)."),
+            return Prompt("Conferencia concluida", ("Alguma prova falhou.", "Recalibre (C) ou confira (V)."),
                           results=self.results_line(), keys=done_keys, tone="error")
         name, label, _, todo, upcoming = CHECKS[self.index]
         step = f"Conferencia {self.index + 1} de {len(CHECKS)}: {label.lower()}"

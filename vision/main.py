@@ -138,12 +138,20 @@ PROMPT_BOTTOM = 116      # o painel termina acima do rodapé técnico (h - 112 a
 
 
 def open_window() -> None:
-    """Abre a janela da visão: redimensionável, sem a barra do OpenCV, no canto de cima."""
-    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
-    cv2.resizeWindow(WINDOW, *WINDOW_SIZE)
-    cv2.imshow(WINDOW, np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 40, np.uint8))
+    """
+    Abre a janela da visão: tamanho fixo, sem a barra do OpenCV, no canto de cima.
+    A imagem é ampliada por show_frame(): com WINDOW_NORMAL o Qt da Pi mostrava a
+    imagem em 640x480 no meio de uma janela maior, sem ampliar.
+    """
+    cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
+    show_frame(np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 40, np.uint8))
     cv2.moveWindow(WINDOW, *WINDOW_PLACE)
     cv2.waitKey(1)
+
+
+def show_frame(frame: np.ndarray) -> None:
+    """Mostra o quadro com o HUD, ampliado para WINDOW_SIZE (ler pelo Connect)."""
+    cv2.imshow(WINDOW, cv2.resize(frame, WINDOW_SIZE, interpolation=cv2.INTER_LINEAR))
 
 
 def _fit_scale(text: str, scale: float, thickness: int, max_width: int) -> float:
@@ -464,7 +472,7 @@ class VisionPipeline:
                     cv2.putText(frame, status_text, (8, h - 54),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
 
-                    cv2.imshow(WINDOW, frame)
+                    show_frame(frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key in (ord("q"), ord("Q")):
                         print("[V-GUARD Vision] Encerramento solicitado pelo usuario ('q').")

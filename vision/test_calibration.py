@@ -192,8 +192,8 @@ class PromptTests(unittest.TestCase):
             session.key(ord('c'), 0)
             self.assertEqual(look(0.2).countdown, 3)
             self.assertEqual(look(2.5).countdown, 1)
-            session.update(sample(), 3, 640, 480)
-            session.update(sample(), 4.5, 640, 480)
+            for now in (3, 3.3, 3.6, 3.9, 4.2, 4.5):       # a 0,3 s: sem lacuna na coleta
+                session.update(sample(), now, 640, 480)
             prompt = look(4.5)
             self.assertEqual(session.state, "neutral")
             self.assertAlmostEqual(prompt.progress, .5)
