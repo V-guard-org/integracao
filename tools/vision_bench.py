@@ -262,7 +262,8 @@ def status_lines(script, status):
 # ---------------------------------------------------------------- janela (OpenCV)
 
 WIDTH, HEIGHT = 960, 540              # onde se desenha
-SHOWN = (1280, 720)                   # o tamanho na tela, ampliado para ler pelo Connect
+SHOWN = (1152, 648)                   # o tamanho na tela, ampliado para ler pelo Connect
+PLACE = (0, 40)                       # canto de cima, abaixo do painel, para caber inteira
 BACKGROUND = (28, 28, 28)             # cinza: uma janela toda preta indica que não desenhou
 BGR = {GREEN: (80, 220, 80), ORANGE: (0, 190, 255), RED: (80, 80, 255), WHITE: (255, 255, 255)}
 GRAY = (170, 170, 170)
@@ -413,7 +414,12 @@ def main(argv=None):
     cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
 
     def show(img):
-        cv2.imshow(window, cv2.resize(img, SHOWN, interpolation=cv2.INTER_AREA if SHOWN[0] < WIDTH else cv2.INTER_LINEAR))
+        cv2.imshow(window, cv2.resize(img, SHOWN, interpolation=cv2.INTER_LINEAR))
+
+    # Sem isto, a janela abre onde o gerenciador quiser, às vezes com metade fora
+    # da tela do Connect (a parte de baixo, quase toda escura, era o que aparecia).
+    show(np.full((HEIGHT, WIDTH, 3), BACKGROUND, np.uint8))
+    cv2.moveWindow(window, *PLACE)
 
     launched = time.monotonic()
     crashed = stopped_early = False
