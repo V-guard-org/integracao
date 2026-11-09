@@ -177,6 +177,21 @@ O `vguard.py` escreve no log (o stderr) a partir do nível INFO. A cada 10 s, ta
 INFO vguard: resumo: visão 13.8 FPS em média; eventos: fadiga 1, distracao 1; Pi até 61.2 °C, throttled sem avisos
 ```
 
+### Bancada guiada da visão (passo 0)
+
+Na tela da Pi (Raspberry Pi Connect), depois da calibração:
+
+```bash
+cd ~/vguard/integracao
+.venv/bin/python tools/vision_bench.py        # 10 min; pasta ../dados-integracao
+```
+
+A visão roda sem tela, como no critério. Uma janela à parte mostra em letra grande o que a pessoa
+na frente da câmera deve fazer agora: olhar para a frente, bocejar e virar o rosto. Cada pedido
+espera o evento aparecer no log e confirma na tela; um pedido sem evento em 60 s fica `FALHOU`.
+**N** pede a próxima ação já (ou pula a atual) e **Q** encerra antes. O log inteiro vai para o
+terminal e para `../dados-integracao/bancada-visao-<data>.log`, e o fim mostra o resumo.
+
 Para guardar o log de uma execução com `timeout`, redirecione para um arquivo
 (`> bancada.log 2>&1`). Sem o `--foreground`, o `timeout` manda o sinal ao grupo de processos
 inteiro, e um `| tee` morreria junto, antes de escrever o resumo.
