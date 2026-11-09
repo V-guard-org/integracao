@@ -22,8 +22,12 @@ class ParseLineTest(unittest.TestCase):
         self.assertEqual(parse_line(line), ("pi", (44.3, "0x0")))
 
     def test_event(self):
-        line = "[EVENTO REGISTRADO] ID=3 Tipo='fadiga' Score=0.82 Tamanho=40074B\n"
+        # O EventManager de hoje devolve um UUID; o do ticket 2, um inteiro.
+        line = ("[EVENTO REGISTRADO] ID=06f0a5ac-ae2e-4584-93fd-c23ee9d264a9 Tipo='fadiga' "
+                "Score=0.7 Tamanho=40255B\n")
         self.assertEqual(parse_line(line), ("event", "fadiga"))
+        line = "[EVENTO REGISTRADO] ID=3 Tipo='distracao' Score=0.82 Tamanho=40074B\n"
+        self.assertEqual(parse_line(line), ("event", "distracao"))
 
     def test_summary(self):
         line = ("2026-11-09 18:28:37,482 INFO vguard: resumo: visão 15.0 FPS em média; "

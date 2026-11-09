@@ -122,7 +122,8 @@ class Script:
             self.step_start = now
 
 
-_EVENT = re.compile(r"\[EVENTO REGISTRADO\] ID=\d+ Tipo='(\w+)'")
+# O ID é o UUID de hoje ou o inteiro do ticket 2: qualquer coisa sem espaço.
+_EVENT = re.compile(r"\[EVENTO REGISTRADO\] ID=\S+ Tipo='(\w+)'")
 _FPS = re.compile(r"visão: ([\d.]+) FPS")
 _PI = re.compile(r"Pi: ([\d.]+) °C, throttled (0x[0-9a-fA-F]+)")
 _SUMMARY = re.compile(r"resumo: (.*)")
