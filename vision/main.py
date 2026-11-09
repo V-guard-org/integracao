@@ -37,17 +37,19 @@ from config import (
     FRAME_HEIGHT,
     FRAME_WIDTH,
     LEFT_EYE_INDICES,
+    MAR_THRESHOLD,
     MIN_FACE_DETECTION_CONFIDENCE,
     MIN_FACE_PRESENCE_CONFIDENCE,
     MIN_TRACKING_CONFIDENCE,
     MODEL_PATH,
     MOUTH_INDICES,
     RIGHT_EYE_INDICES,
+    YAW_THRESHOLD,
 )
 from detector import DetectionResult, DriverStateDetector
 from capture import Capture, is_webcam, open_capture
 from fps import PERIOD_S as FPS_PERIOD_S, FpsMeter
-from calibration import CalibrationSession
+from calibration import CalibrationSession, GuidedCheck, Prompt
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
 
 log = logging.getLogger("vision")
@@ -125,6 +127,87 @@ def draw_hud(
         cv2.putText(frame, alert_text, (20, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
 
+WINDOW = "V-GUARD - Visao Computacional"
+# A janela abre maior e no canto de cima: sem isto, o gerenciador do Connect às vezes
+# a abre com metade fora da tela (visto na bancada guiada de 09/11, Issue #6).
+WINDOW_SIZE = (960, 720)
+WINDOW_PLACE = (0, 40)
+
+PROMPT_TONES = {"info": (0, 220, 255), "ok": (80, 220, 80), "error": (80, 80, 255)}  # BGR
+PROMPT_BOTTOM = 116      # o painel termina acima do rodapé técnico (h - 112 a h - 42)
+
+
+def open_window() -> None:
+    """Abre a janela da visão: redimensionável, sem a barra do OpenCV, no canto de cima."""
+    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
+    cv2.resizeWindow(WINDOW, *WINDOW_SIZE)
+    cv2.imshow(WINDOW, np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 40, np.uint8))
+    cv2.moveWindow(WINDOW, *WINDOW_PLACE)
+    cv2.waitKey(1)
+
+
+def _fit_scale(text: str, scale: float, thickness: int, max_width: int) -> float:
+    """Diminui a letra até o texto caber na largura."""
+    while scale > 0.35:
+        (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        if width <= max_width:
+            break
+        scale -= 0.05
+    return scale
+
+
+def draw_prompt(frame: np.ndarray, prompt: Prompt) -> None:
+    """
+    A instrução da calibração e da conferência, num painel por cima da imagem
+    (Issue #7): o passo, as instruções em letra grande, o retorno, os resultados
+    e as teclas, com a contagem regressiva à direita ou a barra de progresso.
+    Com `compact`, só uma linha no rodapé.
+    """
+    h, w = frame.shape[:2]
+    color = PROMPT_TONES.get(prompt.tone, PROMPT_TONES["info"])
+    if prompt.compact:
+        text = f"{prompt.step}.   {prompt.keys}" if prompt.keys else prompt.step
+        scale = _fit_scale(text, 0.42, 1, w - 16)
+        cv2.putText(frame, text, (8, h - 94), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1)
+        return
+
+    white, gray = (255, 255, 255), (200, 200, 200)
+    rows = [(prompt.step, 0.6, gray, 1, 28)]
+    rows += [(line, 0.8, white, 2, 34) for line in prompt.lines]
+    if prompt.feedback:
+        rows.append((prompt.feedback, 0.75, color, 2, 34))
+    if prompt.results:
+        rows.append((prompt.results, 0.55, gray, 1, 26))
+    if prompt.keys:
+        rows.append((prompt.keys, 0.55, color, 1, 26))
+    bar = 18 if prompt.progress is not None else 0
+    height = 16 + sum(row[4] for row in rows) + bar
+    bottom = h - PROMPT_BOTTOM
+    top = max(0, bottom - height)
+
+    # Fundo escuro translúcido, para o rosto continuar aparecendo atrás
+    region = frame[top:bottom, 6:w - 6]
+    region[:] = cv2.addWeighted(region, 0.25, np.zeros_like(region), 0.75, 0)
+    cv2.rectangle(frame, (6, top), (w - 7, bottom), color, 2)
+
+    text_width = w - 40 - (90 if prompt.countdown is not None else 0)
+    y = top + 8
+    for text, scale, row_color, thickness, step in rows:
+        y += step
+        scale = _fit_scale(text, scale, thickness, text_width)
+        cv2.putText(frame, text, (20, y - 8), cv2.FONT_HERSHEY_SIMPLEX, scale, row_color, thickness,
+                    cv2.LINE_AA)
+    if prompt.progress is not None:
+        x0, x1, yb = 20, w - 26, bottom - 14
+        cv2.rectangle(frame, (x0, yb - 8), (x1, yb), gray, 1)
+        cv2.rectangle(frame, (x0, yb - 8), (x0 + int((x1 - x0) * prompt.progress), yb), color, -1)
+    if prompt.countdown is not None:
+        text = str(prompt.countdown)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 2.6, 6)
+        cv2.putText(frame, text, (w - 30 - tw, top + (bottom - top + th) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.6, color, 6, cv2.LINE_AA)
+
+
 # ==============================================================================
 # 2. CLASSE PRINCIPAL DO PIPELINE (VisionPipeline)
 # ==============================================================================
@@ -175,6 +258,8 @@ class VisionPipeline:
 
         # Inicializa o detector temporal
         self.detector = DriverStateDetector()
+        # Conferência guiada depois da calibração (tecla V), só com a tela (Issue #7)
+        self.check: Optional[GuidedCheck] = None
 
         # Contador de eventos disparados durante a execucao
         self.events_recorded_count = 0
@@ -207,6 +292,24 @@ class VisionPipeline:
         return open_capture(self.source, self.frame_width, self.frame_height,
                             self.camera_fps, self.camera_num, self.infrared, self.camera_python)
 
+    def _start_check(self, now: float) -> None:
+        self.check = GuidedCheck(now, yaw_limit=YAW_THRESHOLD, mar_limit=MAR_THRESHOLD)
+
+    def _handle_key(self, key: int, now: float) -> None:
+        """
+        Teclas da tela: C, F e S da calibração; V começa a conferência guiada
+        (também logo depois do S) e P a pula.
+        """
+        if self.calibration.key(key, now):
+            self._start_check(now)
+        elif key in (ord("c"), ord("C")):
+            self.check = None
+        elif key in (ord("v"), ord("V")) and self.calibration.profile is not None \
+                and not self.calibration.active:
+            self._start_check(now)
+        elif key in (ord("p"), ord("P")) and self.check is not None and self.check.blocking:
+            self.check = None
+
     def run(self) -> int:
         """
         Executa o loop principal de processamento de video.
@@ -220,6 +323,8 @@ class VisionPipeline:
             raise
 
         print(f"[V-GUARD Vision] Iniciando pipeline (source={self.source}, headless={self.headless})...")
+        if not self.headless:
+            open_window()
 
         last_timestamp_ms = 0
         prev_time = time.monotonic()
@@ -277,13 +382,18 @@ class VisionPipeline:
                 raw_metrics = frame_metrics
                 was_calibrating = self.calibration.active
                 frame_metrics = self.calibration.update(frame_metrics, now_mono, w, h)
+                # Na conferência guiada as provas usam o detector, mas nada é gravado
+                checking = not was_calibrating and self.check is not None and self.check.blocking
                 # Processamento temporal e avaliacao de estado do motorista
-                if was_calibrating:
+                if was_calibrating or (checking and self.check.begin_frame(now_mono)):
                     self.detector.reset()
                 detection = self.detector.update(frame_metrics, now_mono)
                 if was_calibrating:
                     detection = replace(detection, driver_state="CALIBRANDO", should_record=False,
                                         event_type=None, score=0.0)
+                elif checking:
+                    self.check.observe(detection.driver_state, frame_metrics, now_mono)
+                    detection = replace(detection, should_record=False, event_type=None)
 
                 # Disparo de evento sob demanda (exclusivamente quando should_record for True)
                 # Otimizacao Raspberry Pi: codifica o frame puro antes dos overlays, sem frame.copy() continuo
@@ -338,8 +448,9 @@ class VisionPipeline:
                     draw_hud(frame, raw_metrics if was_calibrating else frame_metrics,
                              detection, fps, None if was_calibrating else alert_banner)
                     cv2.rectangle(frame, (0, h - 112), (w, h - 42), (25, 25, 25), -1)
-                    cv2.putText(frame, self.calibration.message, (8, h - 94),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+                    showing_check = self.check is not None and not self.calibration.active
+                    prompt = (self.check if showing_check else self.calibration).prompt(now_mono)
+                    draw_prompt(frame, prompt)
                     if raw_metrics is not None:
                         raw_text = (f"Bruto EAR L:{raw_metrics.ear_left:.3f} R:{raw_metrics.ear_right:.3f} "
                                     f"P:{raw_metrics.pitch:+.1f} Y:{raw_metrics.yaw:+.1f}")
@@ -353,13 +464,13 @@ class VisionPipeline:
                     cv2.putText(frame, status_text, (8, h - 54),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
 
-                    cv2.imshow("V-GUARD - Visao Computacional", frame)
+                    cv2.imshow(WINDOW, frame)
                     key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q"):
+                    if key in (ord("q"), ord("Q")):
                         print("[V-GUARD Vision] Encerramento solicitado pelo usuario ('q').")
                         break
-                    self.calibration.key(key, time.monotonic())
-                    if self.calibration.active:
+                    self._handle_key(key, time.monotonic())
+                    if self.calibration.active or (self.check is not None and self.check.blocking):
                         self.detector.reset()
                         alert_banner = None
 
