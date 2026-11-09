@@ -22,7 +22,6 @@ from collections import Counter
 from dataclasses import replace
 import importlib.util
 import logging
-import math
 import os
 import signal
 import sys

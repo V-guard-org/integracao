@@ -1,6 +1,8 @@
 """Teste opt-in: câmera real e evento SINTÉTICO identificado, sem UART/backend.
 
-Usa vguard.run(), FaceLandmarker, detector temporal e EventManager reais.
+Usa o VisionPipeline, o FaceLandmarker, o detector temporal e o EventManager
+reais, num processo só: desde a Issue #10 o vguard.py roda a visão num
+processo filho, e a troca do detector abaixo só vale dentro deste processo.
 Apenas as métricas entregues ao detector são substituídas em memória para
 provocar um episódio determinístico; o JPEG vem do frame real do pipeline.
 Não é uma avaliação da acurácia da detecção de fadiga.
@@ -11,7 +13,6 @@ from dataclasses import asdict, replace
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import resource
 import sqlite3
@@ -19,8 +20,10 @@ import sys
 import time
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import vguard
+REPO = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(REPO / "events"), str(REPO / "vision")]
+from event_manager import EventManager
+import main as vision
 from detector import DriverStateDetector
 from metrics import FrameMetrics
 import cv2
@@ -71,16 +74,19 @@ def main():
         return result
 
     started = time.perf_counter()
-    with patch.dict(os.environ, {"VGUARD_DATA": str(data)}), \
-         patch.object(DriverStateDetector, "update", controlled_update):
-        camera_args = ["--headless", "--source", args.source, "--no-esp32", "--no-gps", "--no-sync",
-                       "--fps", str(args.fps), "--camera-num", str(args.camera_num),
-                       "--max-frames", str(args.frames)]
-        if args.infrared:
-            camera_args.append("--infrared")
-        if args.camera_python:
-            camera_args.extend(["--camera-python", args.camera_python])
-        count = vguard.run(camera_args)
+    camera_args = ["--headless", "--source", args.source,
+                   "--fps", str(args.fps), "--camera-num", str(args.camera_num),
+                   "--max-frames", str(args.frames)]
+    if args.infrared:
+        camera_args.append("--infrared")
+    if args.camera_python:
+        camera_args.extend(["--camera-python", args.camera_python])
+    manager = EventManager(str(data))
+    try:
+        with patch.object(DriverStateDetector, "update", controlled_update):
+            count = vision.build_pipeline(vision.parse_args(camera_args), manager).run()
+    finally:
+        manager.close()
     elapsed = time.perf_counter() - started
     assert frames == args.frames, (frames, args.frames)
     assert count == 1, count

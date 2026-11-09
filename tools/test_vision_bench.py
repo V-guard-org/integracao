@@ -7,8 +7,12 @@ a sequência dos pedidos, sem câmera, sem janela e sem o OpenCV.
 
 import unittest
 
-from vision_bench import (GREEN, ORANGE, RED, Script, ascii_text, clock, parse_line,
-                          status_lines)
+import os
+import tempfile
+
+from vision_bench import (GREEN, KILL, ORANGE, RED, Script, ascii_text, build_steps, clock, criteria,
+                          parse_line, parse_summary, principal_python, status_lines, telemetry_report,
+                          vision_pid)
 
 
 class ParseLineTest(unittest.TestCase):
@@ -187,6 +191,97 @@ class ScriptTest(unittest.TestCase):
         texts.append(Script(600, 120, 60).view(0.0)["detail"])
         for text in texts:
             self.assertEqual(ascii_text(text), text)
+
+
+class PassoCTest(unittest.TestCase):
+    """O passo C (Issue #10): o ESP32, o kill -9 na visão e a telemetria."""
+
+    def test_principal_lines_are_read(self):
+        self.assertEqual(parse_line("2026-11-09 20:38:25,306 INFO vision.process: [EVENTO REGISTRADO] "
+                                    "ID=7f3c Tipo='fadiga' Score=0.7 Tamanho=40255B\n"), ("event", "fadiga"))
+        self.assertEqual(parse_line("2026-11-09 20:37:57,994 WARNING vision.process: visão caiu (código -9); "
+                                    "nova tentativa em 2 s\n"), ("fell", -9))
+        self.assertEqual(parse_line("2026-11-09 20:38:32,001 INFO vision.process: visão de volta depois de "
+                                    "1 tentativa (6 s fora)\n"), ("back", None))
+
+    def test_kill_step_comes_after_the_turned_face(self):
+        steps = build_steps(kill=True)
+        self.assertEqual([step["kind"] for step in steps],
+                         ["normal", "action", "normal", "action", "normal", KILL, "normal"])
+        self.assertEqual(len(build_steps()), 5)
+
+    def test_kill_step_texts_and_ok(self):
+        script = Script(600, 120, 60, steps=build_steps(kill=True), name="passo C")
+        script.begin(0.0)
+        self.assertEqual(script.step_line(0.0), "Passo 1 de 7     0:00 / 10:00")
+        script.index, script.phase, script.phase_start = 4, "normal", 300.0
+        self.assertEqual(script.view(330.0)["footer"], "Em 1:30: matar a visao (kill -9)")
+        script.tick(420.0)
+        view = script.view(421.0)
+        self.assertEqual((view["title"], view["detail"]), ("PREPARE-SE", "Daqui a 4 s: a visao vai ser morta (kill -9)."))
+        script.tick(425.0)
+        view = script.view(426.0)
+        self.assertEqual((view["title"], view["footer"]), ("VISAO MORTA (KILL -9)", "Esperando a visao voltar sozinha..."))
+        script.event("volta", 432.0)
+        view = script.view(432.5)
+        self.assertEqual((view["title"], view["detail"], view["color"]),
+                         ("OK! A VISAO VOLTOU", "A visao voltou sozinha.", GREEN))
+        self.assertEqual(script.expected(), ["fadiga", "distracao", "volta"])
+        self.assertEqual(script.label("volta"), "Visao de volta")
+        for text in (view["title"], view["detail"], view["footer"]):
+            self.assertTrue(text.isascii())
+
+    def test_summary_numbers(self):
+        summary = parse_summary("visão 14.3 FPS em média; eventos: fadiga 1, distracao 1; visão reiniciada 1 vez; "
+                                "ESP32: lost 0, corrupt 2; Pi até 62.8 °C, throttled sem avisos")
+        self.assertEqual(summary, {"fps": 14.3, "restarts": 1, "lost": 0, "corrupt": 2,
+                                   "temp_max": 62.8, "throttled_ok": True})
+        self.assertEqual(parse_summary(None)["fps"], None)
+
+    def test_telemetry_report(self):
+        rows = [(100.0 + i, {"imu": {}, "obd": {"age_ms": {"rpm": 200 + i}}}) for i in range(10)]
+        rows += [(111.8, {"imu": {}, "obd": {}}), (112.8, {"imu": {}})]       # lacuna de 1,8 s
+        report = telemetry_report(rows, 100.0, 120.0, kill_at=108.0)
+        self.assertEqual(report["rows"], 12)
+        self.assertEqual(report["both"], 11)
+        self.assertAlmostEqual(report["max_gap"], 2.8)
+        self.assertAlmostEqual(report["kill_gap"], 2.8)
+        self.assertEqual(report["max_age_ms"], 209)
+        self.assertEqual(telemetry_report(rows, 200.0, 300.0)["rows"], 0)
+
+    def test_criteria(self):
+        script = Script(600, 120, 60, steps=build_steps(kill=True))
+        script.results = {"fadiga": "OK", "distracao": "OK", "volta": "OK"}
+        summary = parse_summary("visão 14.3 FPS em média; eventos: fadiga 1; visão reiniciada 1 vez; "
+                                "ESP32: lost 0, corrupt 0; Pi até 62.8 °C, throttled sem avisos")
+        telemetry = {"rows": 594, "both": 593, "max_gap": 1.02, "kill_gap": 1.02, "max_age_ms": 561}
+        items = criteria(summary, telemetry, script, 600, esp32=True, kill=True)
+        self.assertTrue(all(passed for _, passed, _ in items), items)
+        self.assertEqual(len(items), 11)
+        telemetry["kill_gap"] = 3.5
+        summary["corrupt"] = 1
+        failed = [name for name, passed, _ in criteria(summary, telemetry, script, 600, esp32=True, kill=True)
+                  if not passed]
+        self.assertEqual(failed, ["ESP32 sem perdas", "Telemetria inteira no kill -9"])
+        self.assertEqual(len(criteria(summary, telemetry, Script(600, 120, 60), 600)), 5)
+
+    def test_principal_python(self):
+        self.assertEqual(principal_python({"VGUARD_PYTHON": "/opt/py"}), "/opt/py")
+        self.assertTrue(principal_python({}))
+
+    def test_vision_pid_finds_the_child_of_any_thread(self):
+        with tempfile.TemporaryDirectory() as proc:
+            def write(path, data):
+                full = os.path.join(proc, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "wb") as stream:
+                    stream.write(data)
+            write("100/task/100/children", b"")
+            write("100/task/105/children", b"200 300 ")                  # a thread "vision" iniciou
+            write("200/cmdline", b"vcgencmd\0measure_temp\0")
+            write("300/cmdline", b"/venv/bin/python\0-u\0/repo/vision/main.py\0--channel-fd\0")
+            self.assertEqual(vision_pid(100, proc), 300)
+            self.assertIsNone(vision_pid(999, proc))
 
 
 class TextTest(unittest.TestCase):
