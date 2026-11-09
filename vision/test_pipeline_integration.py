@@ -9,6 +9,7 @@ Teste de integracao do pipeline de visao computacional (main.py) com o Mock do E
 import sys
 import time
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any, Dict, List
 from types import SimpleNamespace
@@ -154,6 +155,7 @@ def test_vision_pipeline_end_to_end():
         assert evt["score"] == 0.88
         assert len(evt["jpeg"]) > 1000, "JPEG deve conter dados de imagem reais"
         assert evt["jpeg"][:2] == b"\xff\xd8", "Cabecalho JPEG invalido"
+        assert pipeline.summary().endswith("; eventos: fadiga 1"), pipeline.summary()
 
         print("    -> OK: VisionPipeline executou os 10 frames e despachou o evento ao MockEventManager!")
 
@@ -205,6 +207,7 @@ def run_all_tests():
     test_csi_frame_to_event()
     test_calibration_blocks_events_and_loaded_pose_reaches_detector()
     test_webcam_failure_is_error_but_video_end_is_not()
+    test_headless_pipeline_logs_fps_every_ten_seconds()
 
     print("\n" + "=" * 65)
     print("TODOS OS TESTES DE INTEGRAÇÃO PASSARAM COM SUCESSO!")
@@ -265,6 +268,26 @@ def test_webcam_failure_is_error_but_video_end_is_not():
                 assert not should_fail, f"{source}: falha da webcam deveria virar erro"
             except RuntimeError as error:
                 assert should_fail and "parou de enviar quadros" in str(error), error
+
+
+def test_headless_pipeline_logs_fps_every_ten_seconds():
+    """Sem tela, a média de 10 s vai ao log e fica no vision_fps (ticket 1b)."""
+    camera, landmarker = Mock(), Mock()
+    frame = np.zeros((480, 640, 3), np.uint8)
+    camera.read.side_effect = lambda: (True, frame)
+    landmarker.detect_for_video.return_value = SimpleNamespace(face_landmarks=[])
+    # 16 quadros por segundo durante 11 s: a média de 10 s fecha uma vez.
+    instants = [1 + i / 16 for i in range(176)]
+    pipeline = VisionPipeline(MockEventManager(), headless=True, source=0, max_frames=len(instants))
+    assert pipeline.vision_fps == 0.0
+    with patch.object(pipeline, '_open_capture', return_value=camera), \
+         patch.object(pipeline, '_init_landmarker', return_value=landmarker), \
+         patch('main.time.monotonic', side_effect=[0.0] + instants), \
+         unittest.TestCase().assertLogs("vision", level="INFO") as logs:
+        pipeline.run()
+    assert pipeline.vision_fps == 16.0, pipeline.vision_fps
+    assert "INFO:vision:visão: 16.0 FPS em 10 s" in logs.output, logs.output
+    assert pipeline.summary() == "visão 16.0 FPS em média; eventos: nenhum", pipeline.summary()
 
 
 if __name__ == "__main__":

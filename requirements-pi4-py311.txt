@@ -1,8 +1,35 @@
 # Alvo validado: Raspberry Pi 4B Cortex-A72, Debian ARM64, CPython 3.11.
 # Usar o ambiente existente; este arquivo não deve ser aplicado à .venv Python 3.13.
 # Uma única distribuição fornece cv2, também exigida pelo MediaPipe.
-mediapipe==0.10.18
-numpy==1.26.4
-opencv-contrib-python==4.11.0.86
+#
+# Lista completa do venv que funcionou na Pi em 08/11/2026 (uv pip freeze),
+# com o Python 3.11.16 do uv. Instalar só pacotes prontos, sem compilar na Pi:
+#   uv pip install --python <venv>/bin/python --only-binary :all: -r requirements-pi4-py311.txt
+# Os que o MediaPipe 0.10.18 prende: numpy abaixo do 2, e jax, jaxlib e
+# opencv-contrib-python nas versões que aceitam esse NumPy.
+absl-py==2.5.1
+attrs==26.1.0
+cffi==2.1.1
+contourpy==1.3.3
+cycler==0.12.1
+flatbuffers==25.12.19
+fonttools==4.68.0
 jax==0.4.35
 jaxlib==0.4.35
+kiwisolver==1.5.1
+matplotlib==3.11.2
+mediapipe==0.10.18
+ml-dtypes==0.5.4
+numpy==1.26.4
+opencv-contrib-python==4.11.0.86
+opt-einsum==3.4.0
+packaging==26.3
+pillow==13.0.0
+protobuf==4.25.9
+pycparser==3.12
+pyparsing==3.3.3
+python-dateutil==4.0.0
+scipy==1.17.1
+sentencepiece==0.2.3
+sounddevice==0.5.6
+tzdata==2026.6
