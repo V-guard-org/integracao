@@ -49,7 +49,7 @@ from config import (
 from detector import DetectionResult, DriverStateDetector
 from capture import Capture, is_webcam, open_capture
 from fps import PERIOD_S as FPS_PERIOD_S, FpsMeter
-from calibration import CalibrationSession, GuidedCheck, Prompt
+from calibration import SPACE, CalibrationSession, GuidedCheck, Prompt
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
 
 log = logging.getLogger("vision")
@@ -128,92 +128,134 @@ def draw_hud(
 
 
 WINDOW = "V-GUARD - Visao Computacional"
-# A janela abre maior e no canto de cima: sem isto, o gerenciador do Connect às vezes
-# a abre com metade fora da tela (visto na bancada guiada de 09/11, Issue #6).
-WINDOW_SIZE = (960, 720)
+# A janela abre no canto de cima: sem isto, o gerenciador do Connect às vezes a
+# abre com metade fora da tela (visto na bancada guiada de 09/11, Issue #6).
 WINDOW_PLACE = (0, 40)
 
-PROMPT_TONES = {"info": (0, 220, 255), "ok": (80, 220, 80), "error": (80, 80, 255)}  # BGR
-PROMPT_BOTTOM = 116      # o painel termina acima do rodapé técnico (h - 112 a h - 42)
+# Coluna ao lado da câmera, com o pedido da vez (Issue #7). A imagem da câmera
+# fica inteira, sem nada por cima além do HUD do canto, e nada é ampliado: a
+# janela tem o tamanho do quadro mais a coluna (1200x480 com 640x480).
+PANEL_WIDTH = 560
+PANEL_MIN_HEIGHT = 480
+PANEL_BACKGROUND = (32, 32, 32)
+PANEL_TONES = {                       # BGR
+    "info": (0, 200, 255),            # amarelo: o pedido da vez
+    "ok": (80, 220, 80),              # verde: deu certo
+    "error": (80, 80, 255),           # vermelho: problema ou prova que não passou
+    "neutral": (235, 235, 235),       # branco: início e monitorando
+}
+FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
 def open_window() -> None:
-    """
-    Abre a janela da visão: tamanho fixo, sem a barra do OpenCV, no canto de cima.
-    A imagem é ampliada por show_frame(): com WINDOW_NORMAL o Qt da Pi mostrava a
-    imagem em 640x480 no meio de uma janela maior, sem ampliar.
-    """
+    """Abre a janela da visão: tamanho fixo, sem a barra do OpenCV, no canto de cima."""
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
-    show_frame(np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 40, np.uint8))
+    cv2.imshow(WINDOW, np.full((max(FRAME_HEIGHT, PANEL_MIN_HEIGHT), FRAME_WIDTH + PANEL_WIDTH, 3),
+                               PANEL_BACKGROUND, np.uint8))
     cv2.moveWindow(WINDOW, *WINDOW_PLACE)
     cv2.waitKey(1)
 
 
-def show_frame(frame: np.ndarray) -> None:
-    """Mostra o quadro com o HUD, ampliado para WINDOW_SIZE (ler pelo Connect)."""
-    cv2.imshow(WINDOW, cv2.resize(frame, WINDOW_SIZE, interpolation=cv2.INTER_LINEAR))
+def _wrap_px(text: str, scale: float, thickness: int, max_width: int) -> list[str]:
+    """Quebra o texto pelas palavras, para cada linha caber em max_width pixels."""
+    lines, current = [], ""
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        (width, _), _ = cv2.getTextSize(candidate, FONT, scale, thickness)
+        if width <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
 
 
-def _fit_scale(text: str, scale: float, thickness: int, max_width: int) -> float:
-    """Diminui a letra até o texto caber na largura."""
-    while scale > 0.35:
-        (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
-        if width <= max_width:
-            break
+def _put(img: np.ndarray, text: str, x: int, y: int, scale: float, color, thickness: int,
+         max_width: int) -> None:
+    """Escreve uma linha, diminuindo a letra se ela não couber."""
+    (width, _), _ = cv2.getTextSize(text, FONT, scale, thickness)
+    while width > max_width and scale > 0.35:
         scale -= 0.05
-    return scale
+        (width, _), _ = cv2.getTextSize(text, FONT, scale, thickness)
+    cv2.putText(img, text, (x, y), FONT, scale, color, thickness, cv2.LINE_AA)
 
 
-def draw_prompt(frame: np.ndarray, prompt: Prompt) -> None:
+def draw_panel(panel: np.ndarray, prompt: Prompt, info_lines: list[str]) -> None:
     """
-    A instrução da calibração e da conferência, num painel por cima da imagem
-    (Issue #7): o passo, as instruções em letra grande, o retorno, os resultados
-    e as teclas, com a contagem regressiva à direita ou a barra de progresso.
-    Com `compact`, só uma linha no rodapé.
+    A coluna ao lado da câmera, no estilo da bancada guiada: o passo, o pedido
+    em letra grande numa faixa colorida, as frases curtas, o retorno ao vivo, a
+    contagem ou a barra da medida e os resultados. Embaixo, as teclas e as
+    linhas técnicas.
     """
-    h, w = frame.shape[:2]
-    color = PROMPT_TONES.get(prompt.tone, PROMPT_TONES["info"])
-    if prompt.compact:
-        text = f"{prompt.step}.   {prompt.keys}" if prompt.keys else prompt.step
-        scale = _fit_scale(text, 0.42, 1, w - 16)
-        cv2.putText(frame, text, (8, h - 94), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1)
-        return
+    h, w = panel.shape[:2]
+    color = PANEL_TONES.get(prompt.tone, PANEL_TONES["info"])
+    white, gray, dim = (255, 255, 255), (190, 190, 190), (140, 140, 140)
+    x, max_width = 24, w - 48
 
-    white, gray = (255, 255, 255), (200, 200, 200)
-    rows = [(prompt.step, 0.6, gray, 1, 28)]
-    rows += [(line, 0.8, white, 2, 34) for line in prompt.lines]
+    y = 34
+    _put(panel, prompt.step, x, y, 0.6, gray, 1, max_width)
+
+    # O pedido, em letra grande, centralizado numa faixa da cor do momento
+    def title_lines(scale):
+        # "\n" no título marca onde quebrar; o resto quebra pela largura
+        return [line for part in prompt.title.split("\n") for line in _wrap_px(part, scale, 3, max_width)]
+
+    scale = 1.25
+    title = title_lines(scale)
+    if len(title) > 2:
+        scale = 1.0
+        title = title_lines(scale)
+    line_height = int(44 * scale / 1.25) + 4
+    top = y + 16
+    bottom = top + 24 + line_height * len(title)
+    cv2.rectangle(panel, (0, top), (w, bottom), tuple(c // 4 for c in color), -1)
+    ty = top + 12
+    for line in title:
+        ty += line_height
+        (width, _), _ = cv2.getTextSize(line, FONT, scale, 3)
+        _put(panel, line, max(x, (w - width) // 2), ty, scale, color, 3, max_width)
+
+    y = bottom + 36
+    for line in prompt.detail:
+        _put(panel, line, x, y, 0.72, white, 2, max_width)
+        y += 30
     if prompt.feedback:
-        rows.append((prompt.feedback, 0.75, color, 2, 34))
-    if prompt.results:
-        rows.append((prompt.results, 0.55, gray, 1, 26))
-    if prompt.keys:
-        rows.append((prompt.keys, 0.55, color, 1, 26))
-    bar = 18 if prompt.progress is not None else 0
-    height = 16 + sum(row[4] for row in rows) + bar
-    bottom = h - PROMPT_BOTTOM
-    top = max(0, bottom - height)
-
-    # Fundo escuro translúcido, para o rosto continuar aparecendo atrás
-    region = frame[top:bottom, 6:w - 6]
-    region[:] = cv2.addWeighted(region, 0.25, np.zeros_like(region), 0.75, 0)
-    cv2.rectangle(frame, (6, top), (w - 7, bottom), color, 2)
-
-    text_width = w - 40 - (90 if prompt.countdown is not None else 0)
-    y = top + 8
-    for text, scale, row_color, thickness, step in rows:
-        y += step
-        scale = _fit_scale(text, scale, thickness, text_width)
-        cv2.putText(frame, text, (20, y - 8), cv2.FONT_HERSHEY_SIMPLEX, scale, row_color, thickness,
-                    cv2.LINE_AA)
+        y += 6
+        _put(panel, prompt.feedback, x, y, 0.85, color, 2, max_width)
+        y += 34
+    if prompt.countdown:
+        y += 6
+        _put(panel, prompt.countdown, x, y, 0.85, color, 2, max_width)
+        y += 34
     if prompt.progress is not None:
-        x0, x1, yb = 20, w - 26, bottom - 14
-        cv2.rectangle(frame, (x0, yb - 8), (x1, yb), gray, 1)
-        cv2.rectangle(frame, (x0, yb - 8), (x0 + int((x1 - x0) * prompt.progress), yb), color, -1)
-    if prompt.countdown is not None:
-        text = str(prompt.countdown)
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 2.6, 6)
-        cv2.putText(frame, text, (w - 30 - tw, top + (bottom - top + th) // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2.6, color, 6, cv2.LINE_AA)
+        y += 4
+        cv2.rectangle(panel, (x, y - 14), (w - x, y), gray, 1)
+        cv2.rectangle(panel, (x, y - 14), (x + int((w - 2 * x) * prompt.progress), y), color, -1)
+        y += 30
+    if prompt.results:
+        _put(panel, prompt.results, x, y, 0.62, gray, 1, max_width)
+
+    # Embaixo: as linhas técnicas e, acima delas, as teclas
+    yb = h - 12
+    for line in reversed(info_lines):
+        _put(panel, line, x, yb, 0.42, dim, 1, max_width)
+        yb -= 20
+    if prompt.keys:
+        cv2.line(panel, (x, yb - 4), (w - x, yb - 4), (70, 70, 70), 1)
+        _put(panel, prompt.keys, x, yb - 18, 0.6, white, 1, max_width)
+
+
+def compose(frame: np.ndarray, prompt: Prompt, info_lines: list[str]) -> np.ndarray:
+    """A imagem da janela: o quadro da câmera (com o HUD) e a coluna ao lado."""
+    h, w = frame.shape[:2]
+    height = max(h, PANEL_MIN_HEIGHT)
+    panel = np.full((height, PANEL_WIDTH, 3), PANEL_BACKGROUND, np.uint8)
+    draw_panel(panel, prompt, info_lines)
+    if h < height:
+        frame = np.vstack([frame, np.full((height - h, w, 3), PANEL_BACKGROUND, np.uint8)])
+    return np.hstack([frame, panel])
 
 
 # ==============================================================================
@@ -306,19 +348,25 @@ class VisionPipeline:
 
     def _handle_key(self, key: int, now: float) -> None:
         """
-        Teclas da tela: C, F e S da calibração; V começa a conferência guiada
-        (também logo depois do S) e P a pula.
+        Teclas da tela (a coluna mostra as que valem agora): C recomeça a
+        calibração; na calibração, ESPAÇO começa ou mede de novo e N pula os
+        olhos; com o perfil pronto, ESPAÇO ou V começa a conferência guiada e
+        N pula a prova da vez.
         """
-        if self.calibration.key(key, now):
-            self._start_check(now)
-        elif key in (ord("c"), ord("C")):
+        if key in (ord("c"), ord("C")):
+            if self.check is not None:
+                log.info("conferência guiada: interrompida (C)")
             self.check = None
-        elif key in (ord("v"), ord("V")) and self.calibration.profile is not None \
-                and not self.calibration.active:
+            self.calibration.start(now)
+        elif self.calibration.active or self.calibration.state == "idle":
+            self.calibration.key(key, now)
+        elif key in (SPACE, ord("v"), ord("V")):
+            if self.check is None or not self.check.blocking:
+                self._start_check(now)
+        elif key in (ord("n"), ord("N")) and self.check is not None and self.check.blocking:
+            self.check.skip(now)
+        if self.calibration.pop_saved():
             self._start_check(now)
-        elif key in (ord("p"), ord("P")) and self.check is not None and self.check.blocking:
-            self.check = None
-            log.info("conferência guiada: pulada (P)")
 
     def run(self) -> int:
         """
@@ -392,6 +440,9 @@ class VisionPipeline:
                 raw_metrics = frame_metrics
                 was_calibrating = self.calibration.active
                 frame_metrics = self.calibration.update(frame_metrics, now_mono, w, h)
+                if self.calibration.pop_saved():
+                    # O perfil acabou de ser gravado: a conferência guiada começa sozinha
+                    self._start_check(now_mono)
                 # Na conferência guiada as provas usam o detector, mas nada é gravado
                 checking = not was_calibrating and self.check is not None and self.check.blocking
                 # Processamento temporal e avaliacao de estado do motorista
@@ -404,8 +455,8 @@ class VisionPipeline:
                 elif checking:
                     self.check.observe(detection.driver_state, frame_metrics, now_mono)
                     detection = replace(detection, should_record=False, event_type=None)
-                    if not self.check.blocking:
-                        log.info("conferência guiada: %s", self.check.results_line())
+                if checking and not self.check.blocking:
+                    log.info("conferência guiada: %s", self.check.results_line())
 
                 # Disparo de evento sob demanda (exclusivamente quando should_record for True)
                 # Otimizacao Raspberry Pi: codifica o frame puro antes dos overlays, sem frame.copy() continuo
@@ -459,24 +510,19 @@ class VisionPipeline:
 
                     draw_hud(frame, raw_metrics if was_calibrating else frame_metrics,
                              detection, fps, None if was_calibrating else alert_banner)
-                    cv2.rectangle(frame, (0, h - 112), (w, h - 42), (25, 25, 25), -1)
                     showing_check = self.check is not None and not self.calibration.active
                     prompt = (self.check if showing_check else self.calibration).prompt(now_mono)
-                    draw_prompt(frame, prompt)
+                    info_lines = []
                     if raw_metrics is not None:
-                        raw_text = (f"Bruto EAR L:{raw_metrics.ear_left:.3f} R:{raw_metrics.ear_right:.3f} "
-                                    f"P:{raw_metrics.pitch:+.1f} Y:{raw_metrics.yaw:+.1f}")
-                        cv2.putText(frame, raw_text, (8, h - 74),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
+                        info_lines.append(f"Bruto EAR L:{raw_metrics.ear_left:.3f} R:{raw_metrics.ear_right:.3f} "
+                                          f"P:{raw_metrics.pitch:+.1f} Y:{raw_metrics.yaw:+.1f}")
                     ocular = "indeterminado"
                     if frame_metrics and frame_metrics.eye_closure is not None:
                         ocular = "baixo" if frame_metrics.eye_closure else "aberto"
                     reference = "relativa" if self.calibration.profile else "sem referencia"
-                    status_text = f"Pose {reference} | Olhos: {ocular} | Reforco: {'sim' if detection.eye_support else 'nao'}"
-                    cv2.putText(frame, status_text, (8, h - 54),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
-
-                    show_frame(frame)
+                    info_lines.append(f"Pose {reference} | Olhos: {ocular} | "
+                                      f"Reforco: {'sim' if detection.eye_support else 'nao'}")
+                    cv2.imshow(WINDOW, compose(frame, prompt, info_lines))
                     key = cv2.waitKey(1) & 0xFF
                     if key in (ord("q"), ord("Q")):
                         print("[V-GUARD Vision] Encerramento solicitado pelo usuario ('q').")

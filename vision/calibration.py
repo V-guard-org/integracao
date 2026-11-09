@@ -5,6 +5,7 @@ auxiliar quando as amostras abertas/fechadas se separam nos dois olhos.
 """
 from dataclasses import asdict, dataclass, replace
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -179,39 +180,43 @@ class CalibrationProfile:
             raise ValueError("Formato de calibracao invalido; recalibre") from exc
 
 
-
-
 # ==============================================================================
 # Tela da calibração e da conferência (Issue #7)
 # ==============================================================================
-# Os textos aparecem num painel por cima da imagem, em letra grande: só ASCII,
-# porque a fonte do OpenCV não tem acento, e no máximo LINE_LIMIT caracteres
-# por linha, para caber nos 640 px.
+# A janela mostra a câmera e, ao lado, uma coluna com o pedido da vez em letra
+# grande, no estilo da bancada guiada (tools/vision_bench.py), que funcionou na
+# bancada de 09/11: quem está na tela lê o pedido em voz alta e aperta as
+# teclas; quem está na câmera olha para a frente e só faz o que for pedido.
+# ESPAÇO segue o pedido da vez, N pula, C recomeça e Q sai. Só ASCII, porque
+# a fonte do OpenCV não tem acento.
 
-LINE_LIMIT = 36
-KEYS_LIMIT = 52
+log = logging.getLogger("vision")
+
+SPACE = 32
+DETAIL_LIMIT = 40      # caracteres por linha das frases curtas
+KEYS_LIMIT = 60
 
 
 @dataclass(frozen=True)
 class Prompt:
     """
-    O que a tela mostra agora. Sem `compact`, um painel com o passo, as
-    instruções, o retorno de uma prova, os resultados e as teclas, mais a
-    contagem regressiva (preparação) ou a barra de progresso (coleta).
-    Com `compact`, uma linha só no rodapé, para não cobrir o rosto.
+    O que a coluna da tela mostra agora: o passo (linha pequena de cima), o
+    pedido em letra grande, até três frases curtas, as teclas e, quando houver,
+    a contagem antes da medida, a barra da medida, o retorno ao vivo de uma
+    prova e os resultados da conferência.
     """
     step: str
-    lines: tuple = ()
+    title: str                  # "\n" marca onde quebrar a linha
+    detail: tuple = ()
     keys: str = ""
-    countdown: int | None = None
+    tone: str = "info"          # "info" (amarelo), "ok" (verde), "error" (vermelho), "neutral" (branco)
+    countdown: str = ""
     progress: float | None = None
     feedback: str = ""
     results: str = ""
-    tone: str = "info"          # "info", "ok" ou "error": a cor do painel
-    compact: bool = False
 
 
-def wrap(text, limit=LINE_LIMIT):
+def wrap(text, limit=DETAIL_LIMIT):
     """Quebra um texto em linhas de no máximo `limit` caracteres, pelas palavras."""
     lines, current = [], ""
     for word in text.split():
@@ -230,27 +235,40 @@ def _countdown(deadline, now):
     return max(1, math.ceil(deadline - now))
 
 
-POSE_STEP = "Passo 1 de 2: postura"
-EYES_STEP = "Passo 2 de 2: olhos (opcional)"
-FACE_LOST = ("Rosto fora da imagem.", "Volte a posicao: a medida recomeca.")
+POSE_STEP = "Calibracao 1 de 3: postura"
+EYES_STEP = "Calibracao 2 de 3: olhos"
+CHECK_STEP = "Calibracao 3 de 3: conferencia"
+FACE_LOST = ("Volte a posicao: a medida", "recomeca sozinha.")
+MEASURE_KEYS = "C: recomecar   Q: sair"
+EYES_KEYS = "N: pular os olhos   C: recomecar   Q: sair"
 
 
 class CalibrationSession:
     """
-    C: postura; F: olhos opcionais; S: concluir. Coleta nunca emite eventos.
-    O `prompt()` diz o que a tela mostra em cada estado.
+    O assistente da calibração, guiado pela tela. ESPAÇO começa: a postura é
+    medida olhando para a frente e, logo depois, os olhos fechados (N pula os
+    olhos). O perfil é gravado sozinho no fim, e o pipeline começa então a
+    conferência guiada (GuidedCheck). A coleta nunca emite eventos.
+
+    Estados: wait_neutral (PRONTOS?), neutral_delay, neutral, neutral_ok,
+    closed_delay, closed, closed_ok, error (postura não medida), wait_closed
+    (olhos não medidos), save_error, ready (perfil pronto) e idle (sem perfil).
     """
 
-    def __init__(self, path=None, recalibrate=False, duration=3.0, min_samples=20, context=""):
+    def __init__(self, path=None, recalibrate=False, duration=3.0, min_samples=20, context="",
+                 delay_s=3.0, ok_s=2.0):
         self.path = Path(path) if path else None
         self.context = context
         self.profile = None
         self.state = "idle"
-        self.error = None          # o último problema, mostrado no painel
-        self.face_lost = False     # o rosto sumiu no meio da coleta
+        self.since = None          # quando o estado atual começou
+        self.error = None          # o último problema, mostrado na tela
+        self.face_lost = False     # o rosto sumiu no meio da medida
+        self.saved = False         # o perfil acabou de ser gravado (ver pop_saved)
         self.duration, self.min_samples = duration, min_samples
+        self.delay_s, self.ok_s = delay_s, ok_s
         self.opened, self.closed = [], []
-        self.started = self.deadline = self.last_sample = None
+        self.started = self.last_sample = None
         self.size = None
         if self.path and self.path.exists() and not recalibrate:
             self.profile = CalibrationProfile.load(self.path)
@@ -264,32 +282,60 @@ class CalibrationSession:
     def active(self):
         return self.state not in ("idle", "ready")
 
-    def start(self, now):
-        self.profile = None
-        self.state, self.deadline = "neutral_delay", now + 3
-        self.opened, self.closed = [], []
+    def _enter(self, state, now):
+        self.state, self.since = state, now
         self.started = self.last_sample = None
-        self.error, self.face_lost = None, False
+        self.face_lost = False
+
+    def start(self, now):
+        """Começa (ou recomeça) pela postura."""
+        self.profile = None
+        self.opened, self.closed = [], []
+        self.error = None
+        self._enter("neutral_delay", now)
+
+    def _start_eyes(self, now):
+        self.closed = []
+        self.error = None
+        self._enter("closed_delay", now)
+
+    def _save(self, now):
+        try:
+            if self.path:
+                self.profile.save(self.path)
+        except OSError as exc:
+            self.error = f"O perfil nao foi gravado: {exc.strerror or exc}"
+            self._enter("save_error", now)
+            log.error("calibração: o perfil não foi gravado em %s: %s", self.path, exc)
+            return
+        self.error = None
+        self._enter("ready", now)
+        self.saved = True
+        eyes = "com os olhos" if self.profile.left_eye else "só com a postura"
+        log.info("calibração: perfil gravado %s%s", eyes, f" em {self.path}" if self.path else "")
+
+    def pop_saved(self):
+        """True uma vez, logo depois de gravar o perfil: hora de começar a conferência."""
+        saved, self.saved = self.saved, False
+        return saved
 
     def key(self, key, now):
-        """Trata uma tecla. Devolve True quando o S gravou o perfil."""
+        """
+        Uma tecla da tela: C recomeça; ESPAÇO começa, mede de novo ou tenta
+        gravar de novo; N pula os olhos e grava só a postura.
+        """
         if key in (ord("c"), ord("C")):
             self.start(now)
-        elif key in (ord("f"), ord("F")) and self.state in ("wait_closed", "wait_ready"):
-            self.state, self.deadline = "closed_delay", now + 3
-            self.closed = []
-            self.started = self.last_sample = None
-            self.error, self.face_lost = None, False
-        elif key in (ord("s"), ord("S")) and self.state in ("wait_closed", "wait_ready"):
-            try:
-                if self.path:
-                    self.profile.save(self.path)
-            except OSError:
-                self.error = "Falha ao gravar o perfil"
-                return False
-            self.state, self.error = "ready", None
-            return True
-        return False
+        elif key == SPACE:
+            if self.state in ("idle", "wait_neutral", "error"):
+                self.start(now)
+            elif self.state == "wait_closed":
+                self._start_eyes(now)
+            elif self.state == "save_error":
+                self._save(now)
+        elif key in (ord("n"), ord("N")) and self.state in ("closed_delay", "closed", "wait_closed"):
+            log.info("calibração: olhos pulados (N)")
+            self._save(now)
 
     def update(self, metrics, now, width, height):
         if self.size is None:
@@ -302,12 +348,17 @@ class CalibrationSession:
             metrics = None
         if not self.active:
             return self.profile.apply(metrics) if self.profile and metrics else metrics
-        if self.state in ("wait_neutral", "wait_closed", "wait_ready", "error"):
+
+        # Passos com tempo: o OK fica na tela por ok_s; a contagem dura delay_s.
+        if self.state == "neutral_ok" and now - self.since >= self.ok_s:
+            self._start_eyes(now)
+        elif self.state == "closed_ok" and now - self.since >= self.ok_s:
+            self._save(now)
+        elif self.state in ("neutral_delay", "closed_delay") and now - self.since >= self.delay_s:
+            self._enter("neutral" if self.state == "neutral_delay" else "closed", now)
+        if self.state not in ("neutral", "closed"):
             return None
-        if self.state.endswith("_delay"):
-            if now < self.deadline:
-                return None
-            self.state = "neutral" if self.state == "neutral_delay" else "closed"
+
         samples = self.opened if self.state == "neutral" else self.closed
         if metrics is None or (self.last_sample is not None and now - self.last_sample > .5):
             samples.clear()
@@ -320,21 +371,26 @@ class CalibrationSession:
             self.started = now
         self.last_sample = now
         samples.append(metrics)
-        elapsed = now - self.started
-        if elapsed < self.duration or len(samples) < self.min_samples:
+        if now - self.started < self.duration or len(samples) < self.min_samples:
             return None
         if self.state == "neutral":
             try:
                 self.profile = CalibrationProfile.from_neutral(samples, width, height, self.context)
-                self.state = "wait_closed"
+                self._enter("neutral_ok", now)
+                log.info("calibração: postura medida")
             except ValueError as exc:
-                self.state, self.error = "error", str(exc)
+                self.error = str(exc)
+                self._enter("error", now)
+                log.info("calibração: postura não medida: %s", exc)
         else:
             try:
                 self.profile = self.profile.with_eyes(self.opened, self.closed)
-                self.state = "wait_ready"
+                self._enter("closed_ok", now)
+                log.info("calibração: olhos medidos")
             except ValueError as exc:
-                self.state, self.error = "wait_closed", str(exc)
+                self.error = str(exc)
+                self._enter("wait_closed", now)
+                log.info("calibração: olhos não medidos: %s", exc)
         return None
 
     def _progress(self, now):
@@ -343,78 +399,110 @@ class CalibrationSession:
         return min(1.0, (now - self.started) / self.duration)
 
     def prompt(self, now):
-        """O que a tela mostra agora, em cada estado do assistente."""
+        """O que a coluna da tela mostra agora, em cada estado do assistente."""
         state = self.state
         if state == "idle":
-            return Prompt("Sem calibracao", keys="C: calibrar   Q: sair", compact=True)
+            return Prompt("Sem perfil de calibracao", "SEM CALIBRACAO",
+                          ("A pose nao e corrigida pela montagem.",),
+                          keys="C: calibrar   Q: sair", tone="neutral")
         if state == "ready":
-            return Prompt("Perfil carregado", keys="V: conferir   C: recalibrar   Q: sair", compact=True)
+            return Prompt("Perfil carregado", "MONITORANDO", ("Os eventos sao gravados normalmente.",),
+                          keys="V: conferir   C: calibrar de novo   Q: sair", tone="neutral")
         if state == "wait_neutral":
-            return Prompt(POSE_STEP, ("Sente como se estivesse dirigindo.",
-                                      "Olhe um ponto a frente, como a",
-                                      "estrada. Nao olhe para a tela."),
-                          keys="C: comecar   Q: sair")
+            return Prompt("Calibracao do motorista", "PRONTOS?",
+                          ("Na camera: sentar como se dirigisse", "e olhar sempre para a frente.",
+                           "Na tela: ler em voz alta o pedido."),
+                          keys="ESPACO: comecar   Q: sair", tone="neutral")
         if state == "neutral_delay":
-            return Prompt(POSE_STEP, ("Olhe para a estrada agora.", "Olhos abertos, boca fechada."),
-                          countdown=_countdown(self.deadline, now))
+            return Prompt(POSE_STEP, "PECA PARA OLHAR\nPARA A FRENTE",
+                          ("Olhos abertos, boca fechada,", "cabeca parada."),
+                          countdown=f"A medida comeca em {_countdown(self.since + self.delay_s, now)}",
+                          keys=MEASURE_KEYS)
         if state == "neutral":
             if self.face_lost:
-                return Prompt(POSE_STEP, FACE_LOST, keys="C: recomecar   Q: sair", tone="error")
-            return Prompt(POSE_STEP, ("Continue olhando a estrada,", "com a cabeca parada."),
-                          progress=self._progress(now), keys="C: recomecar")
+                return Prompt(POSE_STEP, "ROSTO FORA\nDA IMAGEM", FACE_LOST, keys=MEASURE_KEYS, tone="error")
+            return Prompt(POSE_STEP, "MEDINDO A POSTURA", ("Continue olhando para a frente,", "parado."),
+                          progress=self._progress(now), keys=MEASURE_KEYS)
+        if state == "neutral_ok":
+            return Prompt(POSE_STEP, "OK! POSTURA MEDIDA", ("Agora os olhos.",), tone="ok")
         if state == "error":
-            return Prompt(POSE_STEP, wrap(self.error + ".") + ("Aperte C e olhe para a estrada.",),
-                          keys="C: repetir   Q: sair", tone="error")
-        if state == "wait_closed":
-            if self.error:
-                return Prompt(EYES_STEP, wrap(self.error + ".") + ("Meca de novo ou salve so a postura.",),
-                              keys="F: medir de novo   S: salvar so a postura", tone="error")
-            return Prompt(EYES_STEP, ("Postura medida.", "Agora pode medir os olhos fechados."),
-                          keys="F: medir os olhos   S: pular e salvar", tone="ok")
+            return Prompt(POSE_STEP, "MEDIR DE NOVO",
+                          wrap(self.error + ".") + ("Peca para ficar parado olhando", "para a frente."),
+                          keys="ESPACO: medir de novo   Q: sair", tone="error")
         if state == "closed_delay":
-            return Prompt(EYES_STEP, ("Cabeca parada. Feche os olhos", "agora e conte ate 6 para abrir."),
-                          countdown=_countdown(self.deadline, now))
+            return Prompt(EYES_STEP, "PECA PARA FECHAR\nOS OLHOS",
+                          ("Cabeca parada, olhos fechados", "ate aparecer OK aqui."),
+                          countdown=f"A medida comeca em {_countdown(self.since + self.delay_s, now)}",
+                          keys=EYES_KEYS)
         if state == "closed":
             if self.face_lost:
-                return Prompt(EYES_STEP, FACE_LOST, keys="C: recomecar   Q: sair", tone="error")
-            return Prompt(EYES_STEP, ("Olhos fechados, cabeca parada.",),
-                          progress=self._progress(now), keys="C: recomecar")
-        # wait_ready
-        return Prompt(EYES_STEP, ("Olhos medidos. Pode abrir os olhos.",),
-                      keys="S: salvar   F: medir de novo   C: recomecar", tone="ok")
+                return Prompt(EYES_STEP, "ROSTO FORA\nDA IMAGEM", FACE_LOST, keys=EYES_KEYS, tone="error")
+            return Prompt(EYES_STEP, "MEDINDO OS OLHOS", ("Continue de olhos fechados,", "cabeca parada."),
+                          progress=self._progress(now), keys=EYES_KEYS)
+        if state == "closed_ok":
+            return Prompt(EYES_STEP, "OK! PODE ABRIR\nOS OLHOS", ("Olhos medidos. Gravando o perfil...",),
+                          tone="ok")
+        if state == "wait_closed":
+            return Prompt(EYES_STEP, "OLHOS NAO MEDIDOS",
+                          wrap(self.error + ".") + ("Pode medir de novo ou pular.",),
+                          keys="ESPACO: medir de novo   N: pular os olhos", tone="error")
+        # save_error
+        return Prompt(EYES_STEP, "FALHA AO GRAVAR", wrap(self.error + "."),
+                      keys="ESPACO: tentar de novo   Q: sair", tone="error")
 
 
 # ------------------------------------------------------------------------------
 # Conferência guiada
 # ------------------------------------------------------------------------------
 
-# (nome, rótulo, estado do detector que aprova, o que fazer, o que vem depois)
+@dataclass(frozen=True)
+class CheckStep:
+    """Uma prova da conferência e os textos dela."""
+    name: str          # a chave nos resultados
+    label: str         # o rótulo no resumo
+    state: str         # o estado do detector que aprova a prova
+    verb: str          # "Daqui a 3 s: pedir para <verb>."
+    ask: str           # o pedido, em letra grande
+    how: tuple         # como fazer
+    insist: tuple      # depois de hint_after_s sem passar
+    ok: str            # o OK, em letra grande
+    done: str          # a frase do OK
+
+
 CHECKS = (
-    ("lado", "Lado", "DISTRAIDO",
-     ("Vire o rosto para o lado (a janela)", "e segure ate aparecer OK."), "virar o rosto para o lado"),
-    ("bocejo", "Bocejo", "FADIGA",
-     ("Boceje: abra bem a boca e segure", "ate aparecer OK."), "bocejar"),
-    ("estrada", "Estrada", "NORMAL",
-     ("Olhe para a estrada e fique parado.",), "ficar parado olhando a estrada"),
+    CheckStep("lado", "Lado", "DISTRAIDO", "virar o rosto", "PECA PARA VIRAR\nO ROSTO",
+              ("Para o lado (a janela), segurando,", "ate aparecer OK aqui."),
+              ("Ainda nao: virar MAIS o rosto", "e segurar."),
+              "OK! PODE VOLTAR", "Rosto virado detectado."),
+    CheckStep("bocejo", "Bocejo", "FADIGA", "bocejar", "PECA PARA BOCEJAR",
+              ("Boca bem aberta, segurando,", "ate aparecer OK aqui."),
+              ("Ainda nao: abrir MAIS a boca", "e segurar."),
+              "OK! PODE FECHAR\nA BOCA", "Bocejo detectado."),
+    CheckStep("estrada", "Estrada", "NORMAL", "ficar parado", "PECA PARA FICAR\nPARADO",
+              ("Olhando para a frente,", "ate aparecer OK aqui."),
+              ("Ainda nao: ficar parado olhando", "para a frente."),
+              "OK! POSTURA NORMAL", "Postura normal reconhecida."),
 )
+CHECK_KEYS = "N: pular esta prova   C: calibrar de novo   Q: sair"
 
 
 class GuidedCheck:
     """
-    Conferência guiada, depois de salvar o perfil (ou com a tecla V): três
-    provas mostram se o rosto virado, o bocejo e a postura normal são
-    reconhecidos com o perfil novo. Nenhuma prova grava evento.
+    Conferência guiada, logo depois de gravar o perfil (ou com V/ESPAÇO com um
+    perfil carregado): três provas mostram se o rosto virado, o bocejo e a
+    postura normal são reconhecidos com o perfil. Nenhuma prova grava evento.
 
     Parte pura: recebe o estado do detector, as métricas já relativas ao
-    perfil e o horário (monotônico). Cada prova tem uma preparação de
-    `prep_s` com o detector zerado e até `run_s` para passar.
+    perfil e o horário (monotônico). Cada prova tem um aviso de `prep_s`
+    (PREPARE-SE), com o detector zerado; o pedido, até `run_s`, sem contagem
+    na tela; e o resultado (OK ou NAO DETECTOU) por `result_s`.
     """
 
-    def __init__(self, now, prep_s=3.0, run_s=10.0, hold_s=3.0, yaw_limit=25.0, mar_limit=0.60,
-                 done_panel_s=8.0):
-        self.prep_s, self.run_s, self.hold_s = prep_s, run_s, hold_s
+    def __init__(self, now, prep_s=3.0, run_s=20.0, hint_after_s=8.0, result_s=2.5, hold_s=3.0,
+                 yaw_limit=25.0, mar_limit=0.60):
+        self.prep_s, self.run_s, self.hint_after_s = prep_s, run_s, hint_after_s
+        self.result_s, self.hold_s = result_s, hold_s
         self.yaw_limit, self.mar_limit = yaw_limit, mar_limit
-        self.done_panel_s = done_panel_s
         self.index = 0
         self.phase = "prep"
         self.phase_start = now
@@ -424,20 +512,38 @@ class GuidedCheck:
         self.face_lost = False
 
     @property
+    def step(self):
+        return CHECKS[self.index]
+
+    @property
     def blocking(self):
-        """Nas provas, nenhum evento é gravado."""
-        return self.phase in ("prep", "run")
+        """Durante as provas, nenhum evento é gravado."""
+        return self.phase != "done"
 
     @property
     def passed(self):
-        return self.phase == "done" and all(self.results.get(name) == "OK" for name, *_ in CHECKS)
+        return self.phase == "done" and all(self.results.get(step.name) == "OK" for step in CHECKS)
+
+    def _enter(self, phase, now):
+        self.phase, self.phase_start, self.normal_since = phase, now, None
+
+    def _result(self, result, now):
+        self.results[self.step.name] = result
+        self._enter("result", now)
 
     def begin_frame(self, now):
-        """Avança pelo tempo. Devolve True na preparação, quando o detector deve ser zerado."""
-        if self.phase == "prep" and now - self.phase_start >= self.prep_s:
-            self.phase, self.phase_start, self.normal_since = "run", now, None
-        elif self.phase == "run" and now - self.phase_start >= self.run_s:
-            self._finish("FALHOU", now)
+        """Avança pelo tempo. Devolve True no aviso, quando o detector deve ser zerado."""
+        elapsed = now - self.phase_start
+        if self.phase == "prep" and elapsed >= self.prep_s:
+            self._enter("run", now)
+        elif self.phase == "run" and elapsed >= self.run_s:
+            self._result("FALHOU", now)
+        elif self.phase == "result" and elapsed >= self.result_s:
+            if self.index + 1 < len(CHECKS):
+                self.index += 1
+                self._enter("prep", now)
+            else:
+                self._enter("done", now)
         return self.phase == "prep"
 
     def observe(self, driver_state, metrics, now):
@@ -445,32 +551,29 @@ class GuidedCheck:
         self.metrics, self.face_lost = metrics, metrics is None
         if self.phase != "run":
             return
-        expected = CHECKS[self.index][2]
-        if expected == "NORMAL":
+        if self.step.state == "NORMAL":
             if driver_state == "NORMAL":
                 if self.normal_since is None:
                     self.normal_since = now
                 if now - self.normal_since >= self.hold_s:
-                    self._finish("OK", now)
+                    self._result("OK", now)
             else:
                 self.normal_since = None
-        elif driver_state == expected:
-            self._finish("OK", now)
+        elif driver_state == self.step.state:
+            self._result("OK", now)
 
-    def _finish(self, result, now):
-        self.results[CHECKS[self.index][0]] = result
-        self.phase_start = now
-        if self.index + 1 < len(CHECKS):
-            self.index += 1
-            self.phase = "prep"
-        else:
-            self.phase = "done"
+    def skip(self, now):
+        """Tecla N: pula a prova da vez (ou o resultado que está na tela)."""
+        if self.phase in ("prep", "run"):
+            self._result("PULADA", now)
+        elif self.phase == "result":
+            self.phase_start = now - self.result_s     # o próximo begin_frame segue
 
     def results_line(self):
-        return " | ".join(f"{label} {self.results.get(name, '-')}" for name, label, *_ in CHECKS)
+        return " | ".join(f"{step.label} {self.results.get(step.name, '-')}" for step in CHECKS)
 
     def _feedback(self, now):
-        name = CHECKS[self.index][0]
+        name = self.step.name
         if self.face_lost:
             return "Rosto fora da imagem: vire menos." if name == "lado" else "Rosto fora da imagem."
         if self.metrics is None:
@@ -483,23 +586,32 @@ class GuidedCheck:
         return f"Parado: {min(held, self.hold_s):.1f} de {self.hold_s:.0f} s"
 
     def prompt(self, now):
-        """O que a tela mostra agora."""
-        keys = "P: pular a conferencia   C: recalibrar"
+        """O que a coluna da tela mostra agora."""
+        results = self.results_line()
         if self.phase == "done":
-            done_keys = "V: conferir de novo   C: recalibrar   Q: sair"
-            if now - self.phase_start >= self.done_panel_s:
-                return Prompt("Conferencia: " + self.results_line(), keys=done_keys, compact=True)
+            keys = "ESPACO: conferir de novo   C: calibrar de novo   Q: sair"
             if self.passed:
-                return Prompt("Conferencia concluida", ("Tudo certo: lado, bocejo e estrada.",),
-                              results=self.results_line(), keys=done_keys, tone="ok")
-            return Prompt("Conferencia concluida", ("Alguma prova falhou.", "Recalibre (C) ou confira (V)."),
-                          results=self.results_line(), keys=done_keys, tone="error")
-        name, label, _, todo, upcoming = CHECKS[self.index]
-        step = f"Conferencia {self.index + 1} de {len(CHECKS)}: {label.lower()}"
+                return Prompt(CHECK_STEP, "CALIBRACAO PRONTA",
+                              ("As 3 provas passaram.", "A partir de agora os eventos", "sao gravados normalmente."),
+                              results=results, keys=keys, tone="ok")
+            return Prompt(CHECK_STEP, "CONFERIR",
+                          ("Alguma prova nao passou.", "Confira de novo (ESPACO)", "ou calibre de novo (C)."),
+                          results=results, keys=keys, tone="error")
+        step = self.step
+        label = f"{CHECK_STEP} ({self.index + 1} de {len(CHECKS)})"
+        elapsed = now - self.phase_start
         if self.phase == "prep":
-            last = self.results.get(CHECKS[self.index - 1][0]) if self.index else None
-            tone = {"OK": "ok", "FALHOU": "error"}.get(last, "info")
-            return Prompt(step, ("Volte a olhar para a estrada.", *wrap(f"Depois: {upcoming}.")),
-                          countdown=_countdown(self.phase_start + self.prep_s, now),
-                          results=self.results_line(), keys=keys, tone=tone)
-        return Prompt(step, todo, feedback=self._feedback(now), results=self.results_line(), keys=keys)
+            left = _countdown(self.phase_start + self.prep_s, now)
+            return Prompt(label, "PREPARE-SE", (f"Daqui a {left} s: pedir para {step.verb}.",),
+                          results=results, keys=CHECK_KEYS)
+        if self.phase == "run":
+            how = step.insist if elapsed >= self.hint_after_s else step.how
+            return Prompt(label, step.ask, how, feedback=self._feedback(now), results=results,
+                          keys=CHECK_KEYS)
+        result = self.results.get(step.name)
+        last = self.index + 1 >= len(CHECKS)
+        if result == "OK":
+            return Prompt(label, step.ok, (step.done,), results=results, tone="ok")
+        title = "PROVA PULADA" if result == "PULADA" else "NAO DETECTOU"
+        follow = "Fim da conferencia." if last else "Seguindo para a proxima prova."
+        return Prompt(label, title, (follow,), results=results, tone="error")

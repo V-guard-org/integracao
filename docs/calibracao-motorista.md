@@ -22,53 +22,69 @@ O processo não inicia a câmera até esse comando ser executado.
 
 ## Coletar a referência
 
-A janela abre no canto de cima da tela, em 960×720. Um painel por cima da imagem
-diz o passo, o que fazer e as teclas que valem agora (Issue #7). Clique na janela
-para ela receber as teclas.
+A janela abre no canto de cima da tela. À esquerda fica a câmera, só com o painel de
+medidas do canto. À direita, uma coluna mostra o pedido da vez em letra grande, como
+na bancada guiada (`tools/vision_bench.py`). Os papéis são dois:
 
-1. Fixe a câmera na posição de uso, junto ao retrovisor, sem segurar com a mão.
-   Sente na postura habitual, com o rosto enquadrado e os olhos visíveis, e
-   escolha um ponto à frente que represente a estrada.
-2. **Passo 1 de 2, postura.** Aperte **C**. O painel conta 3, 2, 1 ("Olhe para a
-   estrada agora"). Depois, uma barra enche em 3 s, com pelo menos 20 quadros
-   válidos. Olhe o ponto à frente, não a tela nem a lente. Mantenha os olhos
-   abertos, a boca fechada e a cabeça parada.
-3. **Passo 2 de 2, olhos (opcional).** Com a postura medida, o painel fica verde.
-   - **S** salva só a postura.
-   - **F** mede os olhos fechados. Feche os olhos na contagem e conte até 6 antes
-     de abrir: são 3 s de preparação e 3 s de coleta. Depois, **S** salva, e **F**
-     mede de novo.
-4. **C** recomeça tudo, e **Q** sai. Nenhum evento é gravado durante a calibração.
-   A referência anterior no arquivo só é substituída ao salvar com S.
+- **Na câmera:** a pessoa senta como se dirigisse e olha sempre para a frente, nunca
+  para a tela. Ela só faz o que for pedido.
+- **Na tela:** quem está no computador lê o pedido em voz alta e aperta as teclas.
 
-Se algo der errado, o painel fica vermelho e diz o problema e o que fazer:
+Antes de começar, fixe a câmera na posição de uso, junto ao retrovisor, sem segurar com
+a mão, e clique na janela para ela receber as teclas. Depois:
 
-- "A cabeca mexeu durante a medida": aperte C e meça de novo.
-- "Olhos abertos e fechados ficaram parecidos": meça os olhos de novo (F) ou salve
-  só a postura (S).
-- Rosto fora da imagem no meio da coleta: volte à posição. A coleta recomeça sozinha.
+1. **PRONTOS?** Aperte **ESPAÇO**.
+2. **Passo 1 de 3, postura.** "PECA PARA OLHAR PARA A FRENTE", com a contagem "A medida
+   comeca em 3". Em seguida vem "MEDINDO A POSTURA", com uma barra de 3 s, e por fim
+   "OK! POSTURA MEDIDA". Olhos abertos, boca fechada, cabeça parada.
+3. **Passo 2 de 3, olhos.** Começa sozinho, logo depois do OK.
+   - A tela mostra "PECA PARA FECHAR OS OLHOS", depois "MEDINDO OS OLHOS" e por fim
+     "OK! PODE ABRIR OS OLHOS".
+   - Quem está na câmera fica de olhos fechados até ouvir o "pode abrir".
+   - **N** pula os olhos e grava só a postura.
+4. **O perfil é gravado sozinho** no fim dos olhos. Não há tecla de salvar.
+5. **Passo 3 de 3, conferência.** Também começa sozinha (abaixo).
 
-Com FPS muito baixo, a coleta pode levar mais de 3 s.
+Nenhum evento é gravado durante a calibração e a conferência. **C** recomeça a
+calibração do início, e **Q** sai. A referência anterior no arquivo só é substituída
+quando o perfil novo é gravado.
+
+Se algo der errado, a coluna fica vermelha e diz o que houve e o que fazer:
+
+| Na tela | O que houve | O que fazer |
+|---|---|---|
+| MEDIR DE NOVO | A cabeça mexeu durante a medida da postura | ESPAÇO e ficar parado olhando para a frente |
+| OLHOS NAO MEDIDOS | Olhos abertos e fechados ficaram parecidos, ou a cabeça mexeu de olhos fechados | ESPAÇO mede de novo; N pula os olhos |
+| ROSTO FORA DA IMAGEM | O rosto sumiu no meio da medida | Voltar à posição: a medida recomeça sozinha |
+| FALHA AO GRAVAR | O perfil não pôde ser gravado no arquivo | ESPAÇO tenta de novo |
+
+Com FPS muito baixo, a medida pode levar mais de 3 s, porque precisa de pelo menos 20 quadros.
 
 ## Conferência guiada
 
-Logo depois do S, a tela guia três provas, para conferir que a calibração
-funcionou. **Nenhuma prova grava evento.** Cada prova tem 3 s de preparação
-("Volte a olhar para a estrada"), com o detector zerado, e até 10 s para passar:
+Logo depois de gravar o perfil, a coluna guia três provas, para conferir que a
+calibração funcionou. **Nenhuma prova grava evento.** Cada prova tem:
 
-| Prova | O que fazer | Passa quando | Retorno na tela |
+1. um aviso de 3 s, "PREPARE-SE: daqui a 3 s, pedir para ...", com o detector zerado;
+2. o pedido, sem contagem, até aparecer o OK. Depois de 8 s sem passar, a tela pede
+   mais. Em 20 s sem passar, fica `NAO DETECTOU`, e a prova seguinte começa;
+3. o resultado por 2,5 s: "OK! PODE VOLTAR", "OK! PODE FECHAR A BOCA" ou
+   "NAO DETECTOU".
+
+| Prova | Pedido na tela | Passa quando | Retorno ao vivo |
 |---|---|---|---|
-| 1 de 3, lado | Virar o rosto para o lado (a janela) e segurar | o estado vira `DISTRAIDO` (mais de 25° por 2 s) | `Lado: 12 de 25 graus` |
-| 2 de 3, bocejo | Bocejar com a boca bem aberta e segurar | o estado vira `FADIGA` (MAR acima de 0,60 por 1,5 s) | `Boca: 0.45 de 0.60` |
-| 3 de 3, estrada | Olhar a estrada e ficar parado | `NORMAL` por 3 s seguidos | `Parado: 1.2 de 3 s` |
+| 1 de 3, lado | PECA PARA VIRAR O ROSTO | o estado vira `DISTRAIDO` (mais de 25° por 2 s) | `Lado: 12 de 25 graus` |
+| 2 de 3, bocejo | PECA PARA BOCEJAR | o estado vira `FADIGA` (MAR acima de 0,60 por 1,5 s) | `Boca: 0.45 de 0.60` |
+| 3 de 3, estrada | PECA PARA FICAR PARADO | `NORMAL` por 3 s seguidos | `Parado: 1.2 de 3 s` |
 
-- Uma prova que estoura os 10 s fica `FALHOU`, e a seguinte começa.
-- No fim, o resumo (`Lado OK | Bocejo OK | Estrada OK`) fica 8 s no painel e
-  depois passa ao rodapé.
-- Com alguma prova em `FALHOU`, o painel sugere recalibrar (C).
-- **V** começa a conferência a qualquer momento, com a tela aberta e um perfil
-  carregado, sem recalibrar. Serve para conferir um perfil de outro dia.
-- **P** pula a conferência.
+- **N** pula a prova da vez, que conta como não passada.
+- **No fim:** "CALIBRACAO PRONTA" (verde) se as três passaram, ou "CONFERIR" (vermelho)
+  se alguma não passou, com o resumo (`Lado OK | Bocejo OK | Estrada OK`).
+- **Depois disso, os eventos voltam a ser gravados.** ESPAÇO confere de novo, C calibra
+  de novo e Q sai.
+- **Com um perfil já gravado** (sem `--calibrate`), a coluna mostra "MONITORANDO", e
+  **V** (ou ESPAÇO) começa a conferência sem recalibrar. Serve para conferir um perfil de
+  outro dia.
 
 Para reutilizar o perfil salvo:
 
