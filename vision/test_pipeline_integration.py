@@ -6,6 +6,7 @@ Teste de integracao do pipeline de visao computacional (main.py) com o Mock do E
 4. Validacao da assinatura e integridade dos dados enviados para event_manager.record_event(type, score, jpeg, ts).
 """
 
+from dataclasses import replace
 import sys
 import time
 import tempfile
@@ -293,45 +294,66 @@ def test_headless_pipeline_logs_fps_every_ten_seconds():
 
 
 def test_guided_check_records_no_events():
-    """A conferência guiada (Issue #7) começa no V e não grava evento; depois dela, grava."""
-    raw = FrameMetrics(.21, .1, .155, .005, -23.4, 37.1, -12)
+    """
+    A conferência guiada (Issue #7) começa no V, passa as 3 provas com o detector
+    de verdade e não grava evento; depois dela, a gravação volta.
+
+    Em 09/11 o pipeline zerava o detector a cada quadro durante as provas, e o
+    bocejo e o rosto virado nunca passavam: este teste usa o DriverStateDetector
+    real, para pegar esse tipo de erro.
+    """
+    neutral = FrameMetrics(.30, .28, .29, .05, -23.4, 37.1, -12)
+    turned = replace(neutral, yaw=neutral.yaw - 40)      # 40° para o lado, a partir da referência
+    yawning = replace(neutral, mar=.80)
     frame = np.zeros((480, 640, 3), np.uint8)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / 'calibration-driver.json'
-        CalibrationProfile.from_neutral([raw] * 30, 640, 480,
+        CalibrationProfile.from_neutral([neutral] * 30, 640, 480,
             context='source=picamera2;camera=0;infrared=False').save(path)
         manager = MockEventManager()
-        # 0,1 s por quadro: as 3 provas levam até 3 x (3 + 10) s; 500 quadros = 50 s.
-        pipeline = VisionPipeline(manager, calibration_path=path, max_frames=500)
+        # 0,1 s por quadro; depois da conferência (~25 s), 10 s de bocejo para gravar.
+        pipeline = VisionPipeline(manager, calibration_path=path, max_frames=400)
         camera, landmarker = Mock(), Mock()
         camera.read.side_effect = lambda: (True, frame.copy())
         landmarker.detect_for_video.return_value = SimpleNamespace(face_landmarks=[[object()]])
-        # O detector "vê" fadiga em todo quadro e pede gravação.
-        pipeline.detector.update = Mock(return_value=DetectionResult('FADIGA', True, 'fadiga', .9, 0, 2, 0))
+
+        def metrics(*_):
+            """A pessoa faz o que a prova em curso pede; depois da conferência, boceja."""
+            check = pipeline.check
+            if check is None:
+                return neutral
+            if check.phase == "run" and check.index == 0:
+                return turned
+            if check.phase == "run" and check.index == 1:
+                return yawning
+            if check.phase == "done":
+                return yawning
+            return neutral
+
         keys = iter([ord('v')] + [255] * 1000)
         clock = iter([i / 20 for i in range(2000)])     # 2 leituras do relógio por quadro
-        blocking = []
-        real_imshow_calls = []
+        shown = []
         with patch.object(pipeline, '_open_capture', return_value=camera), \
              patch.object(pipeline, '_init_landmarker', return_value=landmarker), \
-             patch('main.extract_all_metrics', return_value=raw), \
+             patch('main.extract_all_metrics', side_effect=metrics), \
              patch('main.open_window'), patch('main.draw_landmarks'), \
-             patch('main.cv2.imshow', side_effect=lambda *a: real_imshow_calls.append(
+             patch('main.cv2.imshow', side_effect=lambda *a: shown.append(
                  (pipeline.check is not None and pipeline.check.blocking, len(manager.recorded_events)))), \
              patch('main.cv2.waitKey', side_effect=lambda *_: next(keys)), \
              patch('main.cv2.destroyAllWindows'), \
-             patch('main.time.monotonic', side_effect=lambda: next(clock)):
+             patch('main.time.monotonic', side_effect=lambda: next(clock)), \
+             unittest.TestCase().assertLogs("vision", level="INFO") as logs:
             pipeline.run()
-        # 1º quadro antes do V: o perfil carregado grava o primeiro evento
-        assert real_imshow_calls[0] == (False, 1), real_imshow_calls[0]
-        during = [count for is_blocking, count in real_imshow_calls if is_blocking]
-        assert during and set(during) == {1}, "a conferência gravou evento"
-        assert pipeline.check.phase == "done", pipeline.check.phase
-        # FADIGA o tempo todo: o lado e a estrada falham, o bocejo passa
-        assert pipeline.check.results == {"lado": "FALHOU", "bocejo": "OK", "estrada": "FALHOU"}, \
-            pipeline.check.results
-        assert len(manager.recorded_events) > 1, "depois da conferência a gravação volta"
-
+        check = pipeline.check
+        assert check.results == {"lado": "OK", "bocejo": "OK", "estrada": "OK"}, check.results
+        guided = [line for line in logs.output if "conferência guiada" in line]
+        assert guided == ["INFO:vision:conferência guiada: começou (nenhum evento é gravado até o fim)",
+                          "INFO:vision:conferência guiada: Lado OK | Bocejo OK | Estrada OK"], guided
+        assert check.passed
+        during = [count for blocking, count in shown if blocking]
+        assert during and set(during) == {0}, "a conferência gravou evento"
+        assert [event["type"] for event in manager.recorded_events] == ["fadiga"], \
+            "depois da conferência a gravação volta"
 
 if __name__ == "__main__":
     run_all_tests()

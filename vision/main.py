@@ -302,6 +302,7 @@ class VisionPipeline:
 
     def _start_check(self, now: float) -> None:
         self.check = GuidedCheck(now, yaw_limit=YAW_THRESHOLD, mar_limit=MAR_THRESHOLD)
+        log.info("conferência guiada: começou (nenhum evento é gravado até o fim)")
 
     def _handle_key(self, key: int, now: float) -> None:
         """
@@ -317,6 +318,7 @@ class VisionPipeline:
             self._start_check(now)
         elif key in (ord("p"), ord("P")) and self.check is not None and self.check.blocking:
             self.check = None
+            log.info("conferência guiada: pulada (P)")
 
     def run(self) -> int:
         """
@@ -402,6 +404,8 @@ class VisionPipeline:
                 elif checking:
                     self.check.observe(detection.driver_state, frame_metrics, now_mono)
                     detection = replace(detection, should_record=False, event_type=None)
+                    if not self.check.blocking:
+                        log.info("conferência guiada: %s", self.check.results_line())
 
                 # Disparo de evento sob demanda (exclusivamente quando should_record for True)
                 # Otimizacao Raspberry Pi: codifica o frame puro antes dos overlays, sem frame.copy() continuo
@@ -478,8 +482,13 @@ class VisionPipeline:
                         print("[V-GUARD Vision] Encerramento solicitado pelo usuario ('q').")
                         break
                     self._handle_key(key, time.monotonic())
-                    if self.calibration.active or (self.check is not None and self.check.blocking):
+                    if self.calibration.active:
                         self.detector.reset()
+                        alert_banner = None
+                    elif self.check is not None and self.check.blocking:
+                        # Sem zerar o detector: nas provas ele precisa acumular os 2 s
+                        # do rosto virado e o 1,5 s do bocejo. A preparação de cada
+                        # prova já o zera (GuidedCheck.begin_frame).
                         alert_banner = None
 
                 # Parada opcional por limite de frames (usado em testes automatizados)
