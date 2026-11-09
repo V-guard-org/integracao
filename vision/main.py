@@ -9,7 +9,12 @@ Pipeline de execucao:
 5. Invocacao do EventManager do V-GUARD (com codificacao JPEG em memoria) sob demanda.
 6. Interface grafica opcional com suporte a execucao headless no Raspberry Pi.
 
-Ponto de entrada: ../vguard.py (este modulo so fornece VisionPipeline e parse_args).
+Este arquivo é também o programa da visão (Issue #10, proposta §6.9): o
+vguard.py o inicia como processo filho, no venv 3.11, com --channel-fd, e
+recebe pelo canal o pronto, o fps e os eventos com o JPEG. Sem
+--channel-fd, a visão roda sozinha e escreve as mensagens no stdout:
+
+    python vision/main.py --source 0 --headless
 """
 
 import argparse
@@ -19,10 +24,11 @@ import importlib.util
 import logging
 import math
 import os
+import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import cv2
 import mediapipe as mp
@@ -50,6 +56,9 @@ from detector import DetectionResult, DriverStateDetector
 from capture import Capture, is_webcam, open_capture
 from fps import PERIOD_S as FPS_PERIOD_S, FpsMeter
 from calibration import SPACE, CalibrationSession, GuidedCheck, Prompt
+import options as vision_options
+from options import ConfigError
+import protocol
 from metrics import FrameMetrics, extract_all_metrics, to_pixel_coords
 
 log = logging.getLogger("vision")
@@ -283,8 +292,18 @@ class VisionPipeline:
         camera_python: Optional[str] = None,
         calibration_path: Optional[Union[str, Path]] = None,
         calibrate: bool = False,
+        on_ready: Optional[Callable[[], None]] = None,
+        on_fps: Optional[Callable[[float], None]] = None,
     ):
+        """
+        `on_ready` é chamado uma vez, com a câmera aberta e o MediaPipe
+        carregado; `on_fps`, a cada média de 10 s. O programa da visão os liga
+        ao canal (o pronto e o fps). Um erro de configuração sai como
+        ConfigError (código 78 no programa da visão).
+        """
         self.event_manager = event_manager
+        self.on_ready = on_ready
+        self.on_fps = on_fps
         self.headless = headless
         self.source = source
         self.model_path = Path(model_path)
@@ -296,13 +315,17 @@ class VisionPipeline:
         self.infrared = infrared
         self.camera_python = camera_python
         context = f"source={source};camera={camera_num};infrared={infrared}"
-        self.calibration = CalibrationSession(calibration_path, recalibrate=calibrate, context=context)
+        try:
+            self.calibration = CalibrationSession(calibration_path, recalibrate=calibrate, context=context)
+        except ValueError as exc:     # perfil inválido, ou de outra câmera ou outro modo IR
+            raise ConfigError(f"Perfil da calibracao: {exc}") from exc
         if headless and self.calibration.active:
-            raise ValueError("Calibracao pendente: execute sem --headless e siga C/F/S no HUD")
+            raise ConfigError("Calibracao pendente: execute sem --headless e siga a tela "
+                              "(tools/test_camera_gui.sh --calibrate)")
 
         if not self.model_path.exists():
-            raise FileNotFoundError(
-                f"Modelo nao encontrado em: {self.model_path}\n"
+            raise ConfigError(
+                f"Modelo nao encontrado em: {self.model_path}. "
                 "Execute 'python scripts/download_model.py' para baixa-lo."
             )
 
@@ -383,6 +406,8 @@ class VisionPipeline:
         print(f"[V-GUARD Vision] Iniciando pipeline (source={self.source}, headless={self.headless})...")
         if not self.headless:
             open_window()
+        if self.on_ready is not None:
+            self.on_ready()
 
         last_timestamp_ms = 0
         prev_time = time.monotonic()
@@ -419,6 +444,8 @@ class VisionPipeline:
                 if period_fps is not None:
                     self.vision_fps = period_fps
                     log.info("visão: %.1f FPS em %g s", period_fps, FPS_PERIOD_S)
+                    if self.on_fps is not None:
+                        self.on_fps(period_fps)
 
                 # Relogio rigorosamente crescente em milissegundos para o MediaPipe VIDEO mode
                 timestamp_ms = max(last_timestamp_ms + 1, int(now_mono * 1000))
@@ -481,14 +508,19 @@ class VisionPipeline:
                                 jpeg=jpeg_bytes,
                                 ts=event_ts,
                             )
+                        except BrokenPipeError:
+                            raise       # o programa principal saiu: a visão sai também
                         except Exception as e:
                             event_id = None
                             print(f"[ERRO] Falha ao registrar evento no EventManager: {e}", file=sys.stderr)
                         if event_id is not None:
                             self.events_recorded_count += 1
                             self._events_by_type[detection.event_type] += 1
+                            # No processo filho o evento é enviado ao principal, que o grava
+                            # e escreve o [EVENTO REGISTRADO] (a bancada guiada lê essa linha).
+                            label = getattr(self.event_manager, "event_label", "EVENTO REGISTRADO")
                             print(
-                                f"[EVENTO REGISTRADO] ID={event_id} Tipo='{detection.event_type}' "
+                                f"[{label}] ID={event_id} Tipo='{detection.event_type}' "
                                 f"Score={event_score} Tamanho={len(jpeg_bytes)}B"
                             )
 
@@ -558,60 +590,116 @@ class VisionPipeline:
 # ==============================================================================
 
 def parse_args(argv=None, parser=None):
+    """As opções da visão (vision/options.py) e o --channel-fd do canal com o principal."""
     parser = parser or argparse.ArgumentParser(
-        description="V-GUARD - Modulo de Visao Computacional (Monitoramento de Motorista)"
+        description="V-GUARD - a visao (o programa filho do vguard.py; sozinha, mostra as mensagens)"
     )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Desativa exibicao de janela grafica OpenCV (obrigatorio para execucao headless no Raspberry Pi)",
-    )
-    parser.add_argument(
-        "--source",
-        type=str,
-        default="picamera2",
-        help="picamera2 para CSI OV5647 (padrao), indice de webcam (ex: 0 para a C525), "
-             "dispositivo /dev/v4l/by-id/... ou arquivo de video",
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=FRAME_WIDTH,
-        help=f"Largura alvo de captura (padrao: {FRAME_WIDTH})",
-    )
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=FRAME_HEIGHT,
-        help=f"Altura alvo de captura (padrao: {FRAME_HEIGHT})",
-    )
-    parser.add_argument("--fps", type=float, default=30.0,
-                        help="FPS solicitado à câmera (padrao: 30; nao altera videos)")
-    parser.add_argument("--camera-num", type=int, default=0,
-                        help="Indice da camera CSI listado por rpicam-hello --list-cameras")
-    parser.add_argument("--infrared", action="store_true",
-                        help="Fixa ganhos de cor para iluminacao IR na CSI; nao aciona LEDs/IR-CUT")
-    parser.add_argument("--camera-python",
-                        help="Python com Picamera2/libcamera para a captura em processo auxiliar "
-                             "(padrao: /usr/bin/python3 se o Python atual nao tiver picamera2)")
-    parser.add_argument("--calibration-file", type=Path,
-                        help="Perfil JSON do motorista e montagem; se faltar, guia C/F/S no HUD")
-    parser.add_argument("--calibrate", action="store_true",
-                        help="Refaz referencia de direcao e olhos opcionais pelo HUD (C/F/S)")
+    vision_options.add_arguments(parser)
+    parser.add_argument("--channel-fd", type=int,
+                        help="Descritor do canal com o programa principal (sem ele, as mensagens vao ao stdout)")
     args = parser.parse_args(argv)
-    if args.width <= 0 or args.height <= 0:
-        parser.error("--width e --height devem ser maiores que zero")
-    if not math.isfinite(args.fps) or args.fps <= 0:
-        parser.error("--fps deve ser finito e maior que zero")
-    if args.camera_num < 0:
-        parser.error("--camera-num deve ser maior ou igual a zero")
-    if args.source != "picamera2" and (args.infrared or args.camera_num != 0 or args.camera_python):
-        parser.error("--infrared, --camera-num e --camera-python exigem --source picamera2")
-    if args.headless and args.calibrate:
-        parser.error("--calibrate exige interface grafica; retire --headless")
+    vision_options.check(parser, args)
     if args.source == "picamera2" and args.camera_python is None:
         args.camera_python = auto_camera_python()
     return args
+
+
+def build_pipeline(args: argparse.Namespace, event_manager: Any, **hooks) -> VisionPipeline:
+    """O VisionPipeline das opções da linha de comando (o programa da visão e as ferramentas)."""
+    return VisionPipeline(
+        event_manager=event_manager,
+        headless=args.headless,
+        source=int(args.source) if args.source.isdigit() else args.source,
+        frame_width=args.width,
+        frame_height=args.height,
+        max_frames=args.max_frames,
+        camera_fps=args.fps,
+        camera_num=args.camera_num,
+        infrared=args.infrared,
+        camera_python=args.camera_python,
+        calibration_path=args.calibration_file,
+        calibrate=args.calibrate,
+        **hooks,
+    )
+
+
+class ChannelSink:
+    """
+    O mensageiro da visão no processo filho (proposta §6.1): a mesma
+    assinatura do record_event do EventManager, mas o evento vai pelo canal ao
+    programa principal, que o grava. Devolve o número da mensagem, para o
+    pipeline contar o envio.
+    """
+
+    event_label = "EVENTO ENVIADO"
+
+    def __init__(self, writer: Any):
+        self.writer = writer
+        self.sent = 0
+
+    def record_event(self, type: str, score: float, jpeg: bytes, ts: float) -> int:
+        self.writer.event(ts, type, score, jpeg)
+        self.sent += 1
+        return self.sent
+
+
+class ConsoleWriter:
+    """Sem o principal: as mensagens do canal no stdout, a linha de JSON sem os bytes do JPEG."""
+
+    def send(self, data: bytes) -> None:
+        line, _, payload = data.partition(b"\n")
+        extra = f"  (+ {len(payload)} bytes do JPEG)" if payload else ""
+        print(f"[canal] {line.decode('ascii')}{extra}", flush=True)
+
+    def ready(self) -> None:
+        self.send(protocol.ready())
+
+    def fps(self, value: float) -> None:
+        self.send(protocol.fps(value))
+
+    def event(self, ts: float, type: str, score: float, jpeg: bytes) -> None:
+        self.send(protocol.event(ts, type, score, jpeg))
+
+
+class Terminated(Exception):
+    """SIGTERM: o principal pediu para a visão sair (ou alguém a matou por fora)."""
+
+
+def _terminate(signum, frame):
+    raise Terminated()
+
+
+def main(argv=None) -> int:
+    """
+    O programa da visão. Códigos de saída (protocol.py): 0 no fim normal (Q
+    na tela ou --max-frames), 78 no erro de configuração, 143 no SIGTERM e
+    1 (com o traceback no log) em qualquer outra falha, que o principal
+    reinicia.
+    """
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if args.channel_fd is not None:
+        # O Ctrl+C do terminal chega aos dois processos: quem cuida dele é o
+        # principal, que manda o SIGTERM. O canal não passa ao auxiliar da CSI.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        os.set_inheritable(args.channel_fd, False)
+        writer = protocol.Writer(args.channel_fd)
+    else:
+        writer = ConsoleWriter()
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        pipeline = build_pipeline(args, ChannelSink(writer), on_ready=writer.ready, on_fps=writer.fps)
+        pipeline.run()
+    except ConfigError as exc:
+        log.error("visão: erro de configuração: %s", exc)
+        return protocol.EXIT_CONFIG
+    except Terminated:
+        log.info("visão: encerrada pelo SIGTERM")
+        return protocol.EXIT_TERMINATED
+    except BrokenPipeError:
+        log.error("visão: o canal com o programa principal fechou")
+        return 1
+    return protocol.EXIT_OK
 
 
 # Raspberry Pi OS: picamera2/libcamera vêm no Python do sistema.
@@ -630,3 +718,7 @@ def auto_camera_python() -> Optional[str]:
     if os.path.realpath(sys.executable) == os.path.realpath(SYSTEM_PYTHON):
         return None
     return SYSTEM_PYTHON if os.path.exists(SYSTEM_PYTHON) else None
+
+
+if __name__ == "__main__":
+    sys.exit(main())

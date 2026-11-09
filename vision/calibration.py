@@ -12,6 +12,8 @@ from pathlib import Path
 import statistics
 import tempfile
 
+from options import ConfigError
+
 
 def _rotation(angles):
     """Convenção de RQDecomp3x3: Rz(roll) @ Ry(yaw) @ Rx(pitch)."""
@@ -343,7 +345,7 @@ class CalibrationSession:
         if self.size != (width, height):
             raise ValueError("Resolucao mudou; reinicie e recalibre")
         if self.profile and (self.profile.width, self.profile.height) != (width, height):
-            raise ValueError("Resolucao diferente do perfil; use --calibrate")
+            raise ConfigError("Resolucao diferente do perfil; use --calibrate")
         if not valid_metrics(metrics):
             metrics = None
         if not self.active:
