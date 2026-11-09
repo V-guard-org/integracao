@@ -22,26 +22,69 @@ O processo não inicia a câmera até esse comando ser executado.
 
 ## Coletar a referência
 
-1. Fixe a câmera na posição pretendida junto ao retrovisor, sem segurar com a mão.
-   Sente na postura habitual, mantendo o rosto enquadrado e os olhos visíveis.
-   Escolha um ponto à frente que represente a estrada. Durante a coleta, olhe
-   esse ponto; não acompanhe a imagem na tela nem olhe para a lente.
-2. Clique na janela da imagem para ela receber as teclas. Pressione **C**.
-   Há 3 segundos de preparação e 3 segundos de coleta, com pelo menos 20 frames
-   válidos. Mantenha olhos abertos, boca fechada e cabeça estável.
-3. Ao aparecer `Postura OK`, escolha **S** para salvar somente a postura, ou **F**
-   para avaliar os olhos. A etapa ocular é opcional.
-4. Com **F**, mantenha a mesma postura e feche os dois olhos por cerca de 6 segundos
-   (3 de preparação + 3 de coleta). Abra-os em seguida. Se a medição for aceita,
-   pressione **S** para salvar e iniciar. Se houver sobreposição ou mudança da
-   cabeça, use **F** para repetir ou **S** para seguir somente com a postura.
-5. **C** refaz a calibração; **Q** sai. Nenhum evento de visão é registrado enquanto
-   o assistente está coletando ou aguardando confirmação. A referência anterior
-   no arquivo só é substituída ao salvar com S.
+A janela abre no canto de cima da tela. À esquerda fica a câmera, só com o painel de
+medidas do canto. À direita, uma coluna mostra o pedido da vez em letra grande, como
+na bancada guiada (`tools/vision_bench.py`). Os papéis são dois:
 
-Se o rosto sumir ou o fluxo de frames parar, o trecho de coleta reinicia. O HUD
-mostra a contagem; com FPS muito baixo a coleta pode levar mais de 3 segundos.
-Se a etapa ocular ficar sem rosto, abra os olhos e pressione C para recomeçar.
+- **Na câmera:** a pessoa senta como se dirigisse e olha sempre para a frente, nunca
+  para a tela. Ela só faz o que for pedido.
+- **Na tela:** quem está no computador lê o pedido em voz alta e aperta as teclas.
+
+Antes de começar, fixe a câmera na posição de uso, junto ao retrovisor, sem segurar com
+a mão, e clique na janela para ela receber as teclas. Depois:
+
+1. **PRONTOS?** Aperte **ESPAÇO**.
+2. **Passo 1 de 3, postura.** "PECA PARA OLHAR PARA A FRENTE", com a contagem "A medida
+   comeca em 3". Em seguida vem "MEDINDO A POSTURA", com uma barra de 3 s, e por fim
+   "OK! POSTURA MEDIDA". Olhos abertos, boca fechada, cabeça parada.
+3. **Passo 2 de 3, olhos.** Começa sozinho, logo depois do OK.
+   - A tela mostra "PECA PARA FECHAR OS OLHOS", depois "MEDINDO OS OLHOS" e por fim
+     "OK! PODE ABRIR OS OLHOS".
+   - Quem está na câmera fica de olhos fechados até ouvir o "pode abrir".
+   - **N** pula os olhos e grava só a postura.
+4. **O perfil é gravado sozinho** no fim dos olhos. Não há tecla de salvar.
+5. **Passo 3 de 3, conferência.** Também começa sozinha (abaixo).
+
+Nenhum evento é gravado durante a calibração e a conferência. **C** recomeça a
+calibração do início, e **Q** sai. A referência anterior no arquivo só é substituída
+quando o perfil novo é gravado.
+
+Se algo der errado, a coluna fica vermelha e diz o que houve e o que fazer:
+
+| Na tela | O que houve | O que fazer |
+|---|---|---|
+| MEDIR DE NOVO | A cabeça mexeu durante a medida da postura | ESPAÇO e ficar parado olhando para a frente |
+| OLHOS NAO MEDIDOS | Olhos abertos e fechados ficaram parecidos, ou a cabeça mexeu de olhos fechados | ESPAÇO mede de novo; N pula os olhos |
+| ROSTO FORA DA IMAGEM | O rosto sumiu no meio da medida | Voltar à posição: a medida recomeça sozinha |
+| FALHA AO GRAVAR | O perfil não pôde ser gravado no arquivo | ESPAÇO tenta de novo |
+
+Com FPS muito baixo, a medida pode levar mais de 3 s, porque precisa de pelo menos 20 quadros.
+
+## Conferência guiada
+
+Logo depois de gravar o perfil, a coluna guia três provas, para conferir que a
+calibração funcionou. **Nenhuma prova grava evento.** Cada prova tem:
+
+1. um aviso de 3 s, "PREPARE-SE: daqui a 3 s, pedir para ...", com o detector zerado;
+2. o pedido, sem contagem, até aparecer o OK. Depois de 8 s sem passar, a tela pede
+   mais. Em 20 s sem passar, fica `NAO DETECTOU`, e a prova seguinte começa;
+3. o resultado por 2,5 s: "OK! PODE VOLTAR", "OK! PODE FECHAR A BOCA" ou
+   "NAO DETECTOU".
+
+| Prova | Pedido na tela | Passa quando | Retorno ao vivo |
+|---|---|---|---|
+| 1 de 3, lado | PECA PARA VIRAR O ROSTO | o estado vira `DISTRAIDO` (mais de 25° por 2 s) | `Lado: 12 de 25 graus` |
+| 2 de 3, bocejo | PECA PARA BOCEJAR | o estado vira `FADIGA` (MAR acima de 0,60 por 1,5 s) | `Boca: 0.45 de 0.60` |
+| 3 de 3, estrada | PECA PARA FICAR PARADO | `NORMAL` por 3 s seguidos | `Parado: 1.2 de 3 s` |
+
+- **N** pula a prova da vez, que conta como não passada.
+- **No fim:** "CALIBRACAO PRONTA" (verde) se as três passaram, ou "CONFERIR" (vermelho)
+  se alguma não passou, com o resumo (`Lado OK | Bocejo OK | Estrada OK`).
+- **Depois disso, os eventos voltam a ser gravados.** ESPAÇO confere de novo, C calibra
+  de novo e Q sai.
+- **Com um perfil já gravado** (sem `--calibrate`), a coluna mostra "MONITORANDO", e
+  **V** (ou ESPAÇO) começa a conferência sem recalibrar. Serve para conferir um perfil de
+  outro dia.
 
 Para reutilizar o perfil salvo:
 

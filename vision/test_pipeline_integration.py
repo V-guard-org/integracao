@@ -6,6 +6,7 @@ Teste de integracao do pipeline de visao computacional (main.py) com o Mock do E
 4. Validacao da assinatura e integridade dos dados enviados para event_manager.record_event(type, score, jpeg, ts).
 """
 
+from dataclasses import replace
 import sys
 import time
 import tempfile
@@ -22,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from detector import DetectionResult
 from main import VisionPipeline
-from calibration import CalibrationProfile
+from calibration import SPACE, CalibrationProfile
 from metrics import FrameMetrics
 
 
@@ -208,6 +209,8 @@ def run_all_tests():
     test_calibration_blocks_events_and_loaded_pose_reaches_detector()
     test_webcam_failure_is_error_but_video_end_is_not()
     test_headless_pipeline_logs_fps_every_ten_seconds()
+    test_guided_check_records_no_events()
+    test_full_calibration_through_the_screen()
 
     print("\n" + "=" * 65)
     print("TODOS OS TESTES DE INTEGRAÇÃO PASSARAM COM SUCESSO!")
@@ -230,6 +233,7 @@ def test_calibration_blocks_events_and_loaded_pose_reaches_detector():
         with patch.object(pipeline, '_open_capture', return_value=camera), \
              patch.object(pipeline, '_init_landmarker', return_value=landmarker), \
              patch('main.extract_all_metrics', return_value=raw), \
+             patch('main.open_window'), \
              patch('main.draw_landmarks'), patch('main.cv2.imshow'), \
              patch('main.cv2.waitKey', return_value=-1), patch('main.cv2.destroyAllWindows'):
             assert pipeline.run() == 0
@@ -289,6 +293,131 @@ def test_headless_pipeline_logs_fps_every_ten_seconds():
     assert "INFO:vision:visão: 16.0 FPS em 10 s" in logs.output, logs.output
     assert pipeline.summary() == "visão 16.0 FPS em média; eventos: nenhum", pipeline.summary()
 
+
+def test_guided_check_records_no_events():
+    """
+    A conferência guiada (Issue #7) começa no V, passa as 3 provas com o detector
+    de verdade e não grava evento; depois dela, a gravação volta.
+
+    Em 09/11 o pipeline zerava o detector a cada quadro durante as provas, e o
+    bocejo e o rosto virado nunca passavam: este teste usa o DriverStateDetector
+    real, para pegar esse tipo de erro.
+    """
+    neutral = FrameMetrics(.30, .28, .29, .05, -23.4, 37.1, -12)
+    turned = replace(neutral, yaw=neutral.yaw - 40)      # 40° para o lado, a partir da referência
+    yawning = replace(neutral, mar=.80)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'calibration-driver.json'
+        CalibrationProfile.from_neutral([neutral] * 30, 640, 480,
+            context='source=picamera2;camera=0;infrared=False').save(path)
+        manager = MockEventManager()
+        # 0,1 s por quadro; a conferência leva ~21 s (aviso, pedido e OK de cada prova);
+        # depois, o bocejo tem de voltar a gravar.
+        pipeline = VisionPipeline(manager, calibration_path=path, max_frames=400)
+        camera, landmarker = Mock(), Mock()
+        camera.read.side_effect = lambda: (True, frame.copy())
+        landmarker.detect_for_video.return_value = SimpleNamespace(face_landmarks=[[object()]])
+
+        def metrics(*_):
+            """A pessoa faz o que a prova em curso pede; depois da conferência, boceja."""
+            check = pipeline.check
+            if check is None:
+                return neutral
+            if check.phase == "run" and check.index == 0:
+                return turned
+            if check.phase == "run" and check.index == 1:
+                return yawning
+            if check.phase == "done":
+                return yawning
+            return neutral
+
+        keys = iter([ord('v')] + [255] * 1000)
+        clock = iter([i / 20 for i in range(2000)])     # 2 leituras do relógio por quadro
+        shown = []
+        with patch.object(pipeline, '_open_capture', return_value=camera), \
+             patch.object(pipeline, '_init_landmarker', return_value=landmarker), \
+             patch('main.extract_all_metrics', side_effect=metrics), \
+             patch('main.open_window'), patch('main.draw_landmarks'), \
+             patch('main.cv2.imshow', side_effect=lambda *a: shown.append(
+                 (pipeline.check is not None and pipeline.check.blocking, len(manager.recorded_events)))), \
+             patch('main.cv2.waitKey', side_effect=lambda *_: next(keys)), \
+             patch('main.cv2.destroyAllWindows'), \
+             patch('main.time.monotonic', side_effect=lambda: next(clock)), \
+             unittest.TestCase().assertLogs("vision", level="INFO") as logs:
+            pipeline.run()
+        check = pipeline.check
+        assert check.results == {"lado": "OK", "bocejo": "OK", "estrada": "OK"}, check.results
+        guided = [line for line in logs.output if "conferência guiada" in line]
+        assert guided == ["INFO:vision:conferência guiada: começou (nenhum evento é gravado até o fim)",
+                          "INFO:vision:conferência guiada: Lado OK | Bocejo OK | Estrada OK"], guided
+        assert check.passed
+        during = [count for blocking, count in shown if blocking]
+        assert during and set(during) == {0}, "a conferência gravou evento"
+        assert [event["type"] for event in manager.recorded_events] == ["fadiga"], \
+            "depois da conferência a gravação volta"
+
+
+def test_full_calibration_through_the_screen():
+    """
+    Do zero, pela tela (Issue #7): ESPAÇO, a postura, os olhos fechados, o perfil
+    gravado sozinho e a conferência guiada, com o detector de verdade. Nenhum
+    evento até o fim da conferência; depois, a gravação volta.
+    """
+    neutral = FrameMetrics(.30, .28, .29, .05, -23.4, 37.1, -12)
+    closed = replace(neutral, ear_left=.09, ear_right=.07, ear=.08)
+    turned = replace(neutral, yaw=neutral.yaw - 40)
+    yawning = replace(neutral, mar=.80)
+    frame = np.zeros((480, 640, 3), np.uint8)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'calibration-driver.json'
+        manager = MockEventManager()
+        # ~16 s de calibração, ~21 s de conferência e o bocejo depois: 600 quadros = 60 s.
+        pipeline = VisionPipeline(manager, calibration_path=path, max_frames=600)
+        camera, landmarker = Mock(), Mock()
+        camera.read.side_effect = lambda: (True, frame.copy())
+        landmarker.detect_for_video.return_value = SimpleNamespace(face_landmarks=[[object()]])
+
+        def metrics(*_):
+            """A pessoa na câmera faz o que a tela pede."""
+            calibration, check = pipeline.calibration, pipeline.check
+            if calibration.state in ("closed_delay", "closed"):
+                return closed
+            if check is not None and check.phase == "run":
+                return (turned, yawning, neutral)[check.index]
+            if check is not None and check.phase == "done":
+                return yawning
+            return neutral
+
+        keys = iter([SPACE] + [255] * 3000)
+        clock = iter([i / 20 for i in range(3000)])     # 2 leituras do relógio por quadro
+        shown = []
+
+        def imshow(name, image):
+            busy = pipeline.calibration.active or (pipeline.check is not None and pipeline.check.blocking)
+            shown.append((busy, len(manager.recorded_events), image.shape))
+
+        with patch.object(pipeline, '_open_capture', return_value=camera), \
+             patch.object(pipeline, '_init_landmarker', return_value=landmarker), \
+             patch('main.extract_all_metrics', side_effect=metrics), \
+             patch('main.open_window'), patch('main.draw_landmarks'), \
+             patch('main.cv2.imshow', side_effect=imshow), \
+             patch('main.cv2.waitKey', side_effect=lambda *_: next(keys)), \
+             patch('main.cv2.destroyAllWindows'), \
+             patch('main.time.monotonic', side_effect=lambda: next(clock)), \
+             unittest.TestCase().assertLogs("vision", level="INFO") as logs:
+            pipeline.run()
+        profile = CalibrationProfile.load(path)
+        assert profile.left_eye is not None, "os olhos deveriam estar no perfil"
+        assert pipeline.check is not None and pipeline.check.passed, pipeline.check.results
+        busy = [count for is_busy, count, _ in shown if is_busy]
+        assert len(busy) > 300 and set(busy) == {0}, "a calibração ou a conferência gravou evento"
+        assert [event["type"] for event in manager.recorded_events] == ["fadiga"], manager.recorded_events
+        assert {shape for _, _, shape in shown} == {(480, 640 + 560, 3)}, "a janela é a câmera e a coluna"
+        steps = [line.split(": ", 1)[1] for line in logs.output
+                 if "calibração:" in line or "conferência guiada:" in line]
+        assert steps == ["postura medida", "olhos medidos", f"perfil gravado com os olhos em {path}",
+                         "começou (nenhum evento é gravado até o fim)", "Lado OK | Bocejo OK | Estrada OK"], steps
 
 if __name__ == "__main__":
     run_all_tests()
