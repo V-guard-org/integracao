@@ -186,11 +186,20 @@ cd ~/vguard/integracao
 .venv/bin/python tools/vision_bench.py        # 10 min; pasta ../dados-integracao
 ```
 
-A visão roda sem tela, como no critério. Uma janela à parte mostra em letra grande o que a pessoa
-na frente da câmera deve fazer agora: olhar para a frente, bocejar e virar o rosto. Cada pedido
-espera o evento aparecer no log e confirma na tela; um pedido sem evento em 60 s fica `FALHOU`.
-**N** pede a próxima ação já (ou pula a atual) e **Q** encerra antes. O log inteiro vai para o
-terminal e para `../dados-integracao/bancada-visao-<data>.log`, e o fim mostra o resumo.
+A visão roda sem tela, como no critério. Uma janela à parte mostra em letra grande o que quem lê
+a tela deve pedir, em voz alta, a quem está na frente da câmera; quem está na câmera olha sempre
+para a frente, nunca para a tela. A sequência começa no **ESPAÇO** e dura 10 min:
+
+1. `OLHE PARA A FRENTE` por 2 min, com a contagem até o próximo pedido;
+2. `PREPARE-SE` por 5 s, e então `PECA PARA BOCEJAR`, até aparecer `OK! PODE FECHAR A BOCA`
+   (o evento `fadiga` chegou ao log). Depois de 20 s sem o evento, a tela pede mais; em 60 s,
+   `NAO DETECTOU`, e a sequência segue;
+3. mais 2 min olhando para a frente, e `PECA PARA VIRAR O ROSTO`, do mesmo jeito (`distracao`);
+4. `OLHE PARA A FRENTE` até o fim.
+
+**N** adianta o passo (ou pula o pedido atual) e **Q** encerra antes. Um evento fora de um pedido
+aparece em vermelho. O log inteiro vai para o terminal e para
+`../dados-integracao/bancada-visao-<data>.log`, e o fim mostra o resumo.
 
 Para guardar o log de uma execução com `timeout`, redirecione para um arquivo
 (`> bancada.log 2>&1`). Sem o `--foreground`, o `timeout` manda o sinal ao grupo de processos

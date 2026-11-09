@@ -1,16 +1,17 @@
 """
 Bancada guiada da visão, o passo 0 (Issue #6): roda a visão sem tela por
-10 min e mostra numa janela da Pi, em letra grande, o que a pessoa na frente
-da câmera deve fazer agora: olhar para a frente, bocejar ou virar o rosto.
-Cada pedido espera o evento aparecer no log da visão e só então segue.
+10 min e mostra numa janela da Pi, em letra grande, o que quem lê a tela
+deve pedir agora a quem está na frente da câmera: olhar para a frente,
+bocejar ou virar o rosto. Cada pedido espera o evento aparecer no log da
+visão e mostra OK assim que ele chega.
 
     .venv/bin/python tools/vision_bench.py
     .venv/bin/python tools/vision_bench.py --seconds 120 --normal 20
 
 Roda na tela da Pi, pelo Raspberry Pi Connect. A visão continua sem tela
 (vguard.py --headless), como pede o critério; a janela só lê o log dela.
-Teclas na janela: N pede a próxima ação já (ou pula a atual) e Q encerra
-antes. O log inteiro vai para o terminal e para
+Teclas na janela: ESPAÇO começa os 10 min, N adianta o passo (ou pula o
+pedido atual) e Q encerra antes. O log inteiro vai para o terminal e para
 <dados>/bancada-visao-<data>.log.
 
 Sai com o código 1 se a visão saiu sozinha, se a bancada foi encerrada
@@ -33,35 +34,55 @@ REPO = os.path.dirname(HERE)
 
 NORMAL, ACTION = "normal", "action"
 
-# (tipo, evento esperado, instrução, detalhe). Só ASCII: a fonte do OpenCV não tem acento.
-LOOK_AHEAD = "Como se estivesse dirigindo. Nao olhe para baixo."
+# Os textos são lidos em voz alta por quem está na tela. Só ASCII: a fonte do
+# OpenCV não tem acento.
 STEPS = (
-    (NORMAL, None, "Olhe para a frente", LOOK_AHEAD),
-    (ACTION, "fadiga", "AGORA: BOCEJE", "Abra bem a boca e segure uns 3 segundos."),
-    (NORMAL, None, "Volte a olhar para a frente", LOOK_AHEAD),
-    (ACTION, "distracao", "AGORA: VIRE O ROSTO", "Olhe para o lado (a janela) e segure uns 3 segundos."),
-    (NORMAL, None, "Olhe para a frente ate o fim", LOOK_AHEAD),
+    {"kind": NORMAL},
+    {"kind": ACTION, "event": "fadiga", "label": "Bocejo", "verb": "bocejar",
+     "ask": "PECA PARA BOCEJAR",
+     "how": "Boca bem aberta, segurando, ate aparecer OK aqui.",
+     "hint": "Ainda nao detectou: abrir MAIS a boca e segurar.",
+     "ok": "OK! PODE FECHAR A BOCA"},
+    {"kind": NORMAL},
+    {"kind": ACTION, "event": "distracao", "label": "Rosto virado", "verb": "virar o rosto",
+     "ask": "PECA PARA VIRAR O ROSTO",
+     "how": "Para o lado (a janela), segurando, ate aparecer OK aqui.",
+     "hint": "Ainda nao detectou: virar MAIS o rosto e segurar.",
+     "ok": "OK! PODE VOLTAR"},
+    {"kind": NORMAL},
 )
-LABELS = {"fadiga": "Bocejo", "distracao": "Rosto virado"}
+
+GREEN, ORANGE, RED, WHITE = "green", "orange", "red", "white"
 
 
 class Script:
     """
-    A sequência dos pedidos, sem janela nem processo: recebe o horário
-    (monotônico) e os eventos, e diz o que mostrar. Os tempos de espera
-    ficam aqui, e a pessoa na frente da câmera só segue a janela.
+    A sequência da bancada, sem janela nem processo: recebe o horário
+    (monotônico) e os eventos, e diz o que mostrar. Os tempos ficam aqui;
+    quem lê a tela só repete o que aparece.
+
+    Fases: "intro" (até o ESPAÇO), "normal" (olhando para a frente), e, em
+    cada pedido, "prep" (aviso de alguns segundos), "ask" (até o evento) e
+    "result" (OK ou NAO DETECTOU, por alguns segundos).
     """
 
-    def __init__(self, start, total_s, normal_s, action_timeout_s, steps=STEPS):
-        self.end = start + total_s
+    def __init__(self, total_s, normal_s, ask_timeout_s, prep_s=5.0, result_s=4.0,
+                 hint_after_s=20.0, steps=STEPS):
+        self.total_s = total_s
         self.normal_s = normal_s
-        self.action_timeout_s = action_timeout_s
+        self.ask_timeout_s = ask_timeout_s
+        self.prep_s = prep_s
+        self.result_s = result_s
+        self.hint_after_s = hint_after_s
         self.steps = steps
+        self.start = self.end = None
         self.index = 0
-        self.step_start = start
+        self.phase = "intro"
+        self.phase_start = None
         self.results = {}      # evento esperado -> "OK", "FALHOU" ou "PULADO"
         self.outside = []      # (tipo, quando) dos eventos fora de um pedido
-        self.last_ok = None    # (tipo, quando) do último pedido cumprido
+
+    # ------------------------------------------------------------ estado
 
     @property
     def step(self):
@@ -71,59 +92,126 @@ class Script:
     def last_step(self):
         return self.index + 1 >= len(self.steps)
 
+    @property
+    def started(self):
+        return self.start is not None
+
     def expected(self):
-        return [step[1] for step in self.steps if step[0] == ACTION]
+        return [step["event"] for step in self.steps if step["kind"] == ACTION]
+
+    def label(self, event):
+        for step in self.steps:
+            if step.get("event") == event:
+                return step["label"]
+        return event
 
     def finished(self, now):
-        return now >= self.end
+        return self.started and now >= self.end
 
     def passed(self):
         return all(self.results.get(name) == "OK" for name in self.expected())
 
+    # ------------------------------------------------------------ entradas
+
+    def begin(self, now):
+        """ESPAÇO: começa a contar os 10 min."""
+        if not self.started:
+            self.start, self.end = now, now + self.total_s
+            self._enter(0, "normal", now)
+
     def tick(self, now):
-        """Passa ao pedido seguinte quando o tempo do atual acaba."""
-        kind, expected = self.step[0], self.step[1]
-        if kind == NORMAL and not self.last_step and now - self.step_start >= self.normal_s:
-            self._next(now)
-        elif kind == ACTION and now - self.step_start >= self.action_timeout_s:
-            self.results[expected] = "FALHOU"
-            self._next(now)
+        """Passa à fase seguinte quando o tempo da atual acaba."""
+        elapsed = None if self.phase_start is None else now - self.phase_start
+        if self.phase == "normal" and not self.last_step and elapsed >= self.normal_s:
+            self._enter(self.index + 1, "prep", now)
+        elif self.phase == "prep" and elapsed >= self.prep_s:
+            self._enter(self.index, "ask", now)
+        elif self.phase == "ask" and elapsed >= self.ask_timeout_s:
+            self.results[self.step["event"]] = "FALHOU"
+            self._enter(self.index, "result", now)
+        elif self.phase == "result" and elapsed >= self.result_s:
+            self._enter(self.index + 1, "normal", now)
 
     def event(self, event_type, now):
         """Um evento gravado pela visão: cumpre o pedido atual ou fica de fora."""
-        kind, expected = self.step[0], self.step[1]
-        if kind == ACTION and event_type == expected:
-            self.results[expected] = "OK"
-            self.last_ok = (event_type, now)
-            self._next(now)
+        # Na preparação também vale: quem lê a tela pode pedir um pouco antes.
+        if self.phase in ("prep", "ask") and event_type == self.step["event"]:
+            self.results[event_type] = "OK"
+            self._enter(self.index, "result", now)
         else:
             self.outside.append((event_type, now))
 
     def skip(self, now):
-        """Tecla N: olhando para a frente, pede a próxima ação já; num pedido, o pula."""
-        kind, expected = self.step[0], self.step[1]
-        if kind == ACTION:
-            self.results[expected] = "PULADO"
-        self._next(now)
+        """Tecla N: adianta a fase atual; num pedido, marca como pulado."""
+        if self.phase == "normal" and not self.last_step:
+            self._enter(self.index + 1, "prep", now)
+        elif self.phase == "prep":
+            self._enter(self.index, "ask", now)
+        elif self.phase == "ask":
+            self.results[self.step["event"]] = "PULADO"
+            self._enter(self.index, "result", now)
+        elif self.phase == "result":
+            self._enter(self.index + 1, "normal", now)
 
-    def countdown(self, now):
-        """Segundos até o próximo pedido, até o fim do pedido atual ou até o fim da bancada."""
-        if self.step[0] == ACTION:
-            left = self.action_timeout_s - (now - self.step_start)
-        elif self.last_step:
-            left = self.end - now
-        else:
-            left = self.normal_s - (now - self.step_start)
-        return max(0.0, min(left, self.end - now))
+    def _enter(self, index, phase, now):
+        self.index, self.phase, self.phase_start = index, phase, now
 
-    def _next(self, now):
-        if not self.last_step:
-            self.index += 1
-            self.step_start = now
+    # ------------------------------------------------------------ o que mostrar
+
+    def view(self, now):
+        """
+        O que a janela mostra agora: o título grande, a cor, a frase de baixo
+        e a linha da contagem. Tudo em ASCII.
+        """
+        step = self.step
+        if self.phase == "intro":
+            return {"title": "PRONTOS?", "color": WHITE,
+                    "detail": "Na camera: olhar sempre para a frente, nunca para a tela.",
+                    "footer": "Na tela: falar em voz alta o que aparecer.  ESPACO: comecar"}
+        elapsed = now - self.phase_start
+        if self.phase == "normal":
+            if self.last_step:
+                return {"title": "OLHE PARA A FRENTE", "color": GREEN,
+                        "detail": "Ultima parte: nada mais a pedir.",
+                        "footer": "Fim em %s" % clock(max(0.0, self.end - now))}
+            next_verb = self.steps[self.index + 1]["verb"]
+            left = min(self.normal_s - elapsed, self.end - now)
+            return {"title": "OLHE PARA A FRENTE", "color": GREEN,
+                    "detail": "Nada a pedir agora.",
+                    "footer": "Em %s: pedir para %s" % (clock(max(0.0, left)), next_verb)}
+        if self.phase == "prep":
+            left = max(1, int(self.prep_s - elapsed + 0.999))
+            return {"title": "PREPARE-SE", "color": ORANGE,
+                    "detail": "Daqui a %d s: pedir para %s." % (left, step["verb"]),
+                    "footer": ""}
+        if self.phase == "ask":
+            detail = step["hint"] if elapsed >= self.hint_after_s else step["how"]
+            return {"title": step["ask"], "color": ORANGE, "detail": detail,
+                    "footer": "Esperando a deteccao..."}
+        if self.results.get(step["event"]) == "OK":
+            return {"title": step["ok"], "color": GREEN,
+                    "detail": "%s detectado e gravado." % step["label"],
+                    "footer": "Volte a olhar para a frente."}
+        return {"title": "NAO DETECTOU", "color": RED,
+                "detail": "%s: %s. Seguindo para o proximo passo." % (
+                    step["label"], self.results.get(step["event"], "FALHOU")),
+                "footer": "Volte a olhar para a frente."}
+
+    def step_line(self, now):
+        """A linha de cima: o passo e o tempo."""
+        if not self.started:
+            return "Bancada da visao (passo 0): 10 min sem tela"
+        return "Passo %d de %d     %s / %s" % (
+            self.index + 1, len(self.steps), clock(min(now, self.end) - self.start), clock(self.total_s))
+
+    def recent_outside(self, now, window_s=6.0):
+        """O último evento fora de um pedido, se foi há pouco (para avisar na tela)."""
+        if self.outside and now - self.outside[-1][1] < window_s:
+            return self.outside[-1][0]
+        return None
 
 
-# O ID é o UUID de hoje ou o inteiro do ticket 2: qualquer coisa sem espaço.
-_EVENT = re.compile(r"\[EVENTO REGISTRADO\] ID=\S+ Tipo='(\w+)'")
+_EVENT = re.compile(r"\[EVENTO REGISTRADO\] ID=\S+ Tipo='(\w+)'")   # UUID hoje, inteiro no ticket 2
 _FPS = re.compile(r"visão: ([\d.]+) FPS")
 _PI = re.compile(r"Pi: ([\d.]+) °C, throttled (0x[0-9a-fA-F]+)")
 _SUMMARY = re.compile(r"resumo: (.*)")
@@ -161,12 +249,11 @@ def clock(seconds):
 
 def status_lines(script, status):
     """As linhas de baixo da janela: os pedidos, os eventos de fora e a visão."""
-    results = []
-    for name in script.expected():
-        results.append("%s: %s" % (LABELS.get(name, name), script.results.get(name, "aguardando")))
+    results = ["%s: %s" % (script.label(name), script.results.get(name, "falta"))
+               for name in script.expected()]
     outside = ", ".join(event for event, _ in script.outside) or "nenhum"
     vision = "Visao %s FPS   Pi %s   throttled %s" % (
-        "-" if status["fps"] is None else "%.1f" % status["fps"],
+        "carregando" if status["fps"] is None else "%.1f" % status["fps"],
         "-" if status["temp"] is None else "%.1f C" % status["temp"],
         status["throttled"] or "-")
     return ["   ".join(results), "Eventos fora do pedido: %s" % outside, vision]
@@ -175,7 +262,8 @@ def status_lines(script, status):
 # ---------------------------------------------------------------- janela (OpenCV)
 
 WIDTH, HEIGHT = 960, 540
-WHITE, GRAY, GREEN, ORANGE, RED = (255, 255, 255), (170, 170, 170), (80, 220, 80), (0, 190, 255), (80, 80, 255)
+BGR = {GREEN: (80, 220, 80), ORANGE: (0, 190, 255), RED: (80, 80, 255), WHITE: (255, 255, 255)}
+GRAY = (170, 170, 170)
 
 
 def _put(cv2, img, text, y, scale, color, thickness=2, x=None):
@@ -191,39 +279,34 @@ def _put(cv2, img, text, y, scale, color, thickness=2, x=None):
     cv2.putText(img, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
 
 
-def draw(cv2, np, script, status, now, started):
+def draw(cv2, np, script, status, now):
     img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
-    kind, _, instruction, detail = script.step
-    _put(cv2, img, "Bancada da visao (passo 0)   %s / %s" % (
-        clock(now - started), clock(script.end - started)), 40, 0.7, GRAY, 1, x=20)
-    color = ORANGE if kind == ACTION else GREEN
-    if kind == ACTION:
-        cv2.rectangle(img, (0, 80), (WIDTH, 290), (0, 60, 90), -1)
-    _put(cv2, img, instruction, 180, 2.2, color, 5)
-    _put(cv2, img, detail, 250, 1.0, WHITE, 2)
-    if kind == ACTION:
-        wait = "Esperando o evento... %s" % clock(script.countdown(now))
-    elif script.last_step:
-        wait = "Fim em %s" % clock(script.countdown(now))
-    else:
-        wait = "Proximo pedido em %s" % clock(script.countdown(now))
-    _put(cv2, img, wait, 330, 0.9, WHITE, 2)
-    if script.last_ok and now - script.last_ok[1] < 10:
-        _put(cv2, img, "OK: evento %s gravado" % script.last_ok[0], 380, 0.9, GREEN, 2)
+    view = script.view(now)
+    color = BGR[view["color"]]
+    _put(cv2, img, script.step_line(now), 40, 0.7, GRAY, 1, x=20)
+    cv2.rectangle(img, (0, 70), (WIDTH, 300), tuple(c // 5 for c in color), -1)
+    _put(cv2, img, view["title"], 170, 2.2, color, 5)
+    _put(cv2, img, view["detail"], 250, 1.0, BGR[WHITE], 2)
+    _put(cv2, img, view["footer"], 345, 0.9, BGR[WHITE], 2)
+    outside = script.recent_outside(now)
+    if outside:
+        _put(cv2, img, "Evento fora do pedido: %s (olhou para baixo ou para a tela?)" % outside,
+             385, 0.7, BGR[RED], 2)
     y = 425
     for line in status_lines(script, status):
         _put(cv2, img, line, y, 0.65, GRAY, 1, x=20)
         y += 30
     if status["problem"]:
-        _put(cv2, img, status["problem"], 515, 0.5, RED, 1, x=20)
-    _put(cv2, img, "N: pedir agora / pular     Q: encerrar", HEIGHT - 8, 0.5, GRAY, 1, x=WIDTH - 420)
+        _put(cv2, img, status["problem"], 515, 0.5, BGR[RED], 1, x=20)
+    keys = "ESPACO: comecar     Q: encerrar" if not script.started else "N: adiantar     Q: encerrar"
+    _put(cv2, img, keys, HEIGHT - 8, 0.5, GRAY, 1, x=WIDTH - 360)
     return img
 
 
 def draw_final(cv2, np, script, status, crashed, stopped_early):
     img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
     ok = script.passed() and not crashed and not stopped_early
-    _put(cv2, img, "FIM: PASSOU" if ok else "FIM: CONFERIR", 120, 2.0, GREEN if ok else RED, 5)
+    _put(cv2, img, "FIM: PASSOU" if ok else "FIM: CONFERIR", 120, 2.0, BGR[GREEN if ok else RED], 5)
     lines = []
     if crashed:
         lines.append("A visao saiu sozinha antes do fim.")
@@ -235,7 +318,7 @@ def draw_final(cv2, np, script, status, crashed, stopped_early):
     lines.append("Avise o Claude. Q: fechar a janela")
     y = 200
     for line in lines:
-        _put(cv2, img, line, y, 0.65, WHITE, 1, x=20)
+        _put(cv2, img, line, y, 0.65, BGR[WHITE], 1, x=20)
         y += 40
     return img
 
@@ -285,10 +368,11 @@ def parse_args(argv=None):
     parser.add_argument("--data", default=data, help="pasta de dados da bancada (padrão: %(default)s)")
     parser.add_argument("--calibration-file", help="perfil do motorista (padrão: <dados>/calibration-driver.json)")
     parser.add_argument("--source", default="0", help="câmera, como no vguard.py (padrão: %(default)s)")
-    parser.add_argument("--seconds", type=float, default=600, help="duração da bancada (padrão: %(default)s)")
+    parser.add_argument("--seconds", type=float, default=600,
+                        help="duração da bancada, a partir do ESPAÇO (padrão: %(default)s)")
     parser.add_argument("--normal", type=float, default=120,
                         help="segundos olhando para a frente antes de cada pedido (padrão: %(default)s)")
-    parser.add_argument("--action-timeout", type=float, default=60,
+    parser.add_argument("--ask-timeout", type=float, default=60,
                         help="segundos de espera do evento em cada pedido (padrão: %(default)s)")
     args = parser.parse_args(argv)
     args.data = os.path.abspath(args.data)
@@ -319,12 +403,12 @@ def main(argv=None):
     reader = threading.Thread(target=_pump, args=(child.stdout, lines, log_path), daemon=True)
     reader.start()
 
-    started = time.monotonic()
-    script = Script(started, args.seconds, args.normal, args.action_timeout)
+    script = Script(args.seconds, args.normal, args.ask_timeout)
     status = {"fps": None, "temp": None, "throttled": None, "problem": None, "summary": None}
     window = "V-GUARD - bancada da visao"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window, WIDTH, HEIGHT)
+    launched = time.monotonic()
     crashed = stopped_early = False
     try:
         while True:
@@ -335,9 +419,11 @@ def main(argv=None):
             if script.finished(now):
                 break
             script.tick(now)
-            cv2.imshow(window, draw(cv2, np, script, status, now, started))
+            cv2.imshow(window, draw(cv2, np, script, status, now))
             key = cv2.waitKey(200) & 0xFF
-            if key in (ord("n"), ord("N")):
+            if key == ord(" "):
+                script.begin(time.monotonic())
+            elif key in (ord("n"), ord("N")) and script.started:
                 script.skip(time.monotonic())
             elif key in (ord("q"), ord("Q")):
                 stopped_early = True
@@ -355,7 +441,9 @@ def main(argv=None):
 
     results = ", ".join("%s %s" % (name, script.results.get(name, "nao pedido")) for name in script.expected())
     outside = ", ".join(event for event, _ in script.outside) or "nenhum"
-    print("\nBancada da visão: %s de %s" % (clock(time.monotonic() - started), clock(args.seconds)))
+    measured = 0.0 if not script.started else min(time.monotonic(), script.end) - script.start
+    print("\nBancada da visão: %s de %s (visão rodando por %s)" % (
+        clock(measured), clock(args.seconds), clock(time.monotonic() - launched)))
     print("A visão saiu sozinha: %s (código %s)" % ("sim" if crashed else "não", child.returncode))
     print("Pedidos: %s" % results)
     print("Eventos fora do pedido: %s" % outside)
