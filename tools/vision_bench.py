@@ -261,7 +261,9 @@ def status_lines(script, status):
 
 # ---------------------------------------------------------------- janela (OpenCV)
 
-WIDTH, HEIGHT = 960, 540
+WIDTH, HEIGHT = 960, 540              # onde se desenha
+SHOWN = (1280, 720)                   # o tamanho na tela, ampliado para ler pelo Connect
+BACKGROUND = (28, 28, 28)             # cinza: uma janela toda preta indica que não desenhou
 BGR = {GREEN: (80, 220, 80), ORANGE: (0, 190, 255), RED: (80, 80, 255), WHITE: (255, 255, 255)}
 GRAY = (170, 170, 170)
 
@@ -280,7 +282,7 @@ def _put(cv2, img, text, y, scale, color, thickness=2, x=None):
 
 
 def draw(cv2, np, script, status, now):
-    img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+    img = np.full((HEIGHT, WIDTH, 3), BACKGROUND, np.uint8)
     view = script.view(now)
     color = BGR[view["color"]]
     _put(cv2, img, script.step_line(now), 40, 0.7, GRAY, 1, x=20)
@@ -304,7 +306,7 @@ def draw(cv2, np, script, status, now):
 
 
 def draw_final(cv2, np, script, status, crashed, stopped_early):
-    img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+    img = np.full((HEIGHT, WIDTH, 3), BACKGROUND, np.uint8)
     ok = script.passed() and not crashed and not stopped_early
     _put(cv2, img, "FIM: PASSOU" if ok else "FIM: CONFERIR", 120, 2.0, BGR[GREEN if ok else RED], 5)
     lines = []
@@ -406,8 +408,13 @@ def main(argv=None):
     script = Script(args.seconds, args.normal, args.ask_timeout)
     status = {"fps": None, "temp": None, "throttled": None, "problem": None, "summary": None}
     window = "V-GUARD - bancada da visao"
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window, WIDTH, HEIGHT)
+    # Tamanho fixo e sem a barra do OpenCV: na 1ª rodada a janela ficou toda preta,
+    # provavelmente pelo zoom da roda do mouse ou pelas setas da barra.
+    cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
+
+    def show(img):
+        cv2.imshow(window, cv2.resize(img, SHOWN, interpolation=cv2.INTER_AREA if SHOWN[0] < WIDTH else cv2.INTER_LINEAR))
+
     launched = time.monotonic()
     crashed = stopped_early = False
     try:
@@ -419,7 +426,7 @@ def main(argv=None):
             if script.finished(now):
                 break
             script.tick(now)
-            cv2.imshow(window, draw(cv2, np, script, status, now))
+            show(draw(cv2, np, script, status, now))
             key = cv2.waitKey(200) & 0xFF
             if key == ord(" "):
                 script.begin(time.monotonic())
@@ -450,7 +457,7 @@ def main(argv=None):
     print("Resumo da visão: %s" % (status["summary"] or "não chegou"))
     print("Log: %s" % log_path)
 
-    cv2.imshow(window, draw_final(cv2, np, script, status, crashed, stopped_early))
+    show(draw_final(cv2, np, script, status, crashed, stopped_early))
     while cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) >= 1:
         if (cv2.waitKey(200) & 0xFF) in (ord("q"), ord("Q")):
             break
