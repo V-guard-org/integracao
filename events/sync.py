@@ -1,15 +1,16 @@
 """
-V-GUARD — Sincronização com o backend por Wi-Fi ou 4G.
+V-GUARD — Sincronização com o backend por Wi-Fi ou 4G, pelo HTTP antigo.
 
-Envia o que o EventManager tem pendente e só marca como confirmado o
-que o backend respondeu com 2xx (RF22):
+Envia a saúde e a telemetria pendente e só marca como confirmado o que o
+backend respondeu com 2xx (RF22):
 
-    Wi-Fi autorizado   saúde + telemetria + eventos + fotografias
-    4G                 saúde + telemetria + eventos + fotografias
+    Wi-Fi autorizado   saúde + telemetria
+    4G                 saúde + telemetria
     sem enlace         nada; tudo continua pendente no SD
 
-As fotografias vão por último e podem atrasar: se o envio de uma falha (4G
-fraco), ela fica pendente para o próximo ciclo e não adia os dados.
+Os eventos não saem por aqui: desde o ticket 2 (Issue #14), eles esperam no
+SQLite pelo POST /api/events do ticket 3. A telemetria e a saúde passam ao
+MQTT no ticket 4.
 
 Roda em uma thread do mesmo processo do EventManager:
 
@@ -33,14 +34,10 @@ from event_manager import CONFIRMED, FAILED
 # CONFIGURAÇÃO
 # ============================================================
 
-# Contrato PROVISÓRIO, até a API do backend ser definida:
+# Contrato PROVISÓRIO, até os tickets 3 e 4 (contrato-pi-servidor.md):
 #
 #   POST /health               JSON
 #   POST /telemetry            JSON {"items": [{id, ts, data}, ...]}
-#   PUT  /events/<id>          JSON {id, type, ts, score, data, has_photo, window}
-#   PUT  /events/<id>/photo    image/jpeg
-#
-# Os PUT levam o id do evento na URL: reenviar não duplica (RNF26).
 
 BACKEND_URL = os.environ.get("VGUARD_BACKEND", "https://vguard.example/api")
 DEVICE_ID = os.environ.get("VGUARD_DEVICE", "vguard-01")
@@ -187,42 +184,9 @@ class Sync:
                 state = send("POST", "/telemetry", {"items": batch})
                 manager.ack_telemetry([item["id"] for item in batch], state)
 
-            # a janela vai junto com os metadados, inclusive no 4G
-            # (~150 kB por evento com IMU a 100 Hz).
-            for event in manager.pending_events():
-                event["window"] = manager.window(event["id"])
-                state = send("PUT", "/events/" + event["id"], event)
-                manager.ack_event(event["id"], state)
-
-            # Foto atrasa, mas não atrasa os dados: se o envio falha (4G fraco,
-            # backend ainda sem o evento), ela fica pendente para o próximo ciclo e
-            # este termina normalmente. Um erro aqui subir para run() dobraria o
-            # intervalo e adiaria a telemetria e os eventos.
-            photo_failed = False
-            try:
-                for event_id, path in manager.pending_photos():
-                    try:
-                        with open(path, "rb") as f:
-                            jpeg = f.read()
-                    except FileNotFoundError:
-                        # Apagada do cartão à mão: nunca vai subir. Sem isto, a
-                        # primeira foto ausente travaria a fila de fotos para sempre.
-                        logging.warning("foto do evento %s não existe mais no cartão", event_id)
-                        manager.ack_photo(event_id, FAILED)
-                        continue
-
-                    state = send(
-                        "PUT", "/events/" + event_id + "/photo", jpeg, "image/jpeg"
-                    )
-                    manager.ack_photo(event_id, state)
-            except (OSError, http.client.HTTPException, Retry) as error:
-                logging.warning("foto atrasada, tenta no próximo ciclo (%s)", error)
-                photo_failed = True
-
             # De novo no fim, se a fila mudou: senão o dashboard mostraria
             # as pendências de antes do envio até o próximo ciclo.
-            # (a conexão pode ter caído com a foto: a saúde segue no próximo ciclo)
-            if not photo_failed and manager.pending_counts() != before:
+            if manager.pending_counts() != before:
                 send("POST", "/health", self.health(link))
 
         finally:

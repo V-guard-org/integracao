@@ -7,7 +7,6 @@ Verificação da sincronização contra um backend falso local. Executar:
 
 import http.server
 import json
-import os
 import tempfile
 import threading
 import time
@@ -75,76 +74,44 @@ def main():
     # Backend na mesma máquina (notebook): conta como Wi-Fi.
     assert sync.active_link() == "wifi"
 
-    manager = EventManager(tempfile.mkdtemp())
+    folder = tempfile.TemporaryDirectory(prefix="vguard-teste-")
+    manager = EventManager(folder.name)
     for i in range(300):
         ts = 1000.0 + i / 10
         manager.update("imu", {"ax": i}, ts)
         if i == 100:
-            first = manager.record_event("fadiga", 0.9, JPEG, ts)
+            manager.record_event("fadiga", 0.9, JPEG, ts)
         if i == 110:
-            bad = manager.record_event("distracao", 0.7, JPEG, ts)
+            manager.record_event("distracao", 0.7, JPEG, ts)
 
     link = [None]
     service = sync.Sync(manager, link=lambda: link[0])
 
     # Sem enlace: nada sai, tudo pendente.
     assert service.sync_once() is None and Backend.received == []
-    assert manager.pending_counts() == {
-        "telemetry": 30, "events": 2, "photos": 2
-    }
+    assert manager.pending_counts() == {"telemetry": 30, "events": 2}
 
-    # 4G: saúde, telemetria, metadados (com janela) e a foto do evento aceito.
-    # O backend recusa um dos eventos (422): vira FAILED e sai da fila.
+    # 4G: a saúde e a telemetria. Os eventos esperam no SQLite pelo
+    # POST /api/events do ticket 3 (Issue #14).
     link[0] = "cellular"
-    Backend.fault = ("/events/" + bad, 422)
     assert service.sync_once() == "cellular"
 
     assert len(json.loads(received("/telemetry")[0])["items"]) == 30
-    event, = [json.loads(body) for body in received("/events/" + first)]
-    assert event["type"] == "fadiga" and len(event["window"]) == 201
-    assert event["has_photo"] == 1        # a foto existe na Pi
-    assert received("/events/" + bad) == []
-    assert received("/photo") == [JPEG]   # a foto sobe pelo 4G, logo depois dos dados
-    assert manager.pending_counts() == {
-        "telemetry": 0, "events": 0, "photos": 0
-    }
+    assert [path for path, _ in Backend.received if "/events" in path or "photo" in path] == []
+    assert manager.pending_counts() == {"telemetry": 0, "events": 2}
     assert service.last_contact is not None
 
     # A saúde vai no começo e, como a fila mudou, de novo no fim, já com
     # as pendências depois do envio.
     first_health, last_health = [json.loads(body) for body in received("/health")]
-    assert first_health["pending"] == {"telemetry": 30, "events": 2, "photos": 2}
-    assert last_health["pending"] == {"telemetry": 0, "events": 0, "photos": 0}
+    assert first_health["pending"] == {"telemetry": 30, "events": 2}
+    assert last_health["pending"] == {"telemetry": 0, "events": 2}
 
-    # Nada é reenviado no ciclo seguinte, nem o evento recusado.
+    # Nada é reenviado no ciclo seguinte.
     count = len(Backend.received)
-    service.sync_once()
-    assert len(Backend.received) == count + 1   # só a saúde
-
-    # Upload da foto interrompido (4G fraco): a foto fica pendente, mas o ciclo
-    # termina normalmente e os dados do mesmo ciclo já foram confirmados.
-    late = manager.record_event("fadiga", 0.9, JPEG + b"3", 1300.0)
-    manager.update("imu", {"ax": 0}, 1320.0)     # fecha a janela
-    Backend.fault = ("/photo", "drop")
-    assert service.sync_once() == "cellular"     # não levanta: foto atrasa, dado não
-    assert len(received("/events/" + late)) == 1
-    assert received("/photo") == [JPEG]
-    assert [i for i, _ in manager.pending_photos()] == [late]
-
-    # ...e é reenviada inteira no ciclo seguinte, agora pelo Wi-Fi.
     link[0] = "wifi"
     assert service.sync_once() == "wifi"
-    assert received("/photo") == [JPEG, JPEG + b"3"]
-    assert manager.pending_photos() == []
-
-    # Foto apagada do cartão à mão: sai da fila e não trava as seguintes.
-    gone = manager.record_event("fadiga", 0.8, JPEG, 1500.0)
-    manager.record_event("distracao", 0.8, JPEG + b"2", 1506.0)
-    manager.update("imu", {"ax": 0}, 1520.0)     # fecha as janelas
-    os.remove(os.path.join(manager.photo_dir, gone + ".jpg"))
-    assert service.sync_once() == "wifi"
-    assert received("/photo")[-1] == JPEG + b"2"
-    assert manager.pending_photos() == []
+    assert len(Backend.received) == count + 1   # só a saúde
 
     # Servidor lento (T34.2): grava, mas responde depois do tempo de espera.
     # O item continua pendente e volta no ciclo seguinte; a chave por ts no
@@ -184,6 +151,7 @@ def main():
     assert manager.pending_counts()["telemetry"] == 1
 
     manager.close()
+    folder.cleanup()
     print("OK")
 
 

@@ -1,189 +1,348 @@
 """
-Verificação do gerenciador de eventos. Executar:
+Testes do gerenciador de eventos no modelo novo (ticket 2, Issue #14): a
+telemetria, o evento com o retrato e a foto, a fila de envio, a queda de
+energia, o corte abrupto e o banco do modelo antigo. Cada pasta temporária é
+apagada no fim. A partir de events/:
 
-    python test_event_manager.py
     python3 test_event_manager.py
+
+O corte de energia de verdade é puxar a fonte da Pi com o gravador rodando e
+conferir depois:
+
+    python3 test_event_manager.py writer <pasta>
+    python3 test_event_manager.py check <pasta>
 """
 
 import os
 import random
+import re
+import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+import unittest
+from unittest.mock import patch
 
 import event_manager
-from event_manager import EventManager
+from event_manager import FAILED, EventManager
 
 JPEG = b"\xff\xd8\xff\xe0 foto de teste \xff\xd9"
+BIG_JPEG = JPEG * 5000      # ~100 KB, o tamanho de uma foto de verdade
+
+# O esquema do modelo antigo (até 09/11), para os testes do banco antigo.
+OLD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS telemetry (
+    id     INTEGER PRIMARY KEY,
+    ts     REAL NOT NULL,
+    data   TEXT NOT NULL,
+    synced INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS events (
+    id           TEXT PRIMARY KEY,
+    type         TEXT NOT NULL,
+    ts           REAL NOT NULL,
+    score        REAL,
+    data         TEXT NOT NULL,
+    photo        TEXT,
+    meta_synced  INTEGER NOT NULL DEFAULT 0,
+    photo_synced INTEGER NOT NULL DEFAULT 0,
+    window_closed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS event_window (
+    event_id TEXT NOT NULL REFERENCES events (id),
+    ts       REAL NOT NULL,
+    source   TEXT NOT NULL,
+    data     TEXT NOT NULL
+);
+"""
 
 
-def main():
-    data_dir = tempfile.mkdtemp()
-    manager = EventManager(data_dir)
+class Folder(unittest.TestCase):
+    """Uma pasta de dados nova por teste, apagada no fim."""
 
-    # Telemetria a 10 Hz durante 30 s, com um evento no meio.
-    for i in range(300):
-        ts = 1000.0 + i / 10
-        manager.update("imu", {"ax": i}, ts)
-        manager.update("gps", {"lat": -25.4, "lon": -49.2}, ts)
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="vguard-teste-")
+        self.addCleanup(directory.cleanup)
+        self.data_dir = directory.name
 
-        if i == 150:
-            event_id = manager.record_event("fadiga", 0.9, JPEG, ts)
+    def open(self):
+        manager = EventManager(self.data_dir)
+        self.addCleanup(manager.close)
+        return manager
 
-            # A parte anterior da janela já está no SD: 10 s, 2 fontes, 10 Hz.
-            window = manager.window(event_id)
-            assert len(window) == 202
-            assert window[0]["ts"] == 1005.0 and window[-1]["ts"] == 1015.0
-
-            # A janela ainda está aberta: o evento não entra na fila.
-            assert manager.pending_events() == []
-
-        if i == 160:
-            # Cooldown vale por tipo.
-            assert manager.record_event("fadiga", 0.9, JPEG, ts) is None
-            assert manager.record_event("distracao", 0.7, None, ts)
-
-    # No SD, a telemetria contínua é uma linha por segundo.
-    assert manager.pending_counts()["telemetry"] == 30
-
-    # Janela completa: 10 s antes e 10 s depois, sem amostra repetida.
-    window = manager.window(event_id)
-    assert len(window) == 402
-    assert window[0]["ts"] == 1005.0 and window[-1]["ts"] == 1025.0
-
-    # Evento: snapshot das fontes disponíveis e foto no disco.
-    # Sem OBD-II o evento é registrado do mesmo jeito (RNF20).
-    event, other = manager.pending_events()
-    assert event["id"] == event_id and event["ts"] == 1015.0
-    assert set(event["data"]) == {"imu", "gps"}
-
-    # Envio pelo 4G: metadados confirmados, foto continua pendente (RF18).
-    # A foto só entra na fila depois dos metadados.
-    assert manager.pending_photos() == []
-    manager.ack_event(event_id)
-
-    (photo_id, path), = manager.pending_photos()
-    assert photo_id == event_id
-    assert open(path, "rb").read() == JPEG
-
-    # Queda de energia logo após um evento (sem close): a fila volta
-    # como estava (RNF25) e o evento fica com a parte anterior da janela.
-    cut_id = manager.record_event("fadiga", 0.8, JPEG, ts)
-
-    # Restos de um corte no meio da gravação de uma foto: somem no boot.
-    for name in ("meia-foto.jpg.tmp", "sem-evento.jpg"):
-        open(os.path.join(manager.photo_dir, name), "wb").write(JPEG)
-
-    manager = EventManager(data_dir)
-    assert len(os.listdir(manager.photo_dir)) == 2
-
-    assert manager.pending_counts() == {
-        "telemetry": 30, "events": 2, "photos": 2
-    }
-    assert [e["id"] for e in manager.pending_events()] == [other["id"], cut_id]
-    window = manager.window(cut_id)
-    assert window[0]["ts"] >= ts - 10 and window[-1]["ts"] == ts
-    assert len(window) >= 200
-
-    # Wi-Fi: fotos e telemetria confirmadas.
-    manager.ack_photo(event_id)
-    manager.ack_photo(cut_id)
-    manager.ack_telemetry([t["id"] for t in manager.pending_telemetry()])
-    counts = manager.pending_counts()
-    assert counts["photos"] == 0 and counts["telemetry"] == 0
-
-    # Confirmar não apaga nada do SD.
-    assert os.path.exists(path) and len(manager.window(event_id)) == 402
-
-    # Limpeza: com o SD abaixo do alerta, nada é apagado.
-    assert manager.storage_status()["level"] == "ok"
-    manager.cleanup()
-    assert os.path.exists(path)
-
-    # No alerta, sai só o que o backend confirmou por inteiro. `cut_id`
-    # ainda tem os metadados pendentes: fica com foto e janela.
-    event_manager.STORAGE_WARN = 0.0
-    manager.cleanup()
-    event_manager.STORAGE_WARN = 0.80
-
-    assert not os.path.exists(path) and manager.window(event_id) == []
-    assert [e["id"] for e in manager.pending_events()] == [other["id"], cut_id]
-    assert os.listdir(manager.photo_dir) == [cut_id + ".jpg"]
-    assert len(manager.window(cut_id)) >= 200
-
-    manager.close()
-    print("OK")
+    def names(self):
+        return sorted(os.listdir(self.data_dir))
 
 
-# ============================================================
-# CORTE ABRUPTO
-# ============================================================
+class TelemetryTest(Folder):
 
-BIG_JPEG = JPEG * 20000   # ~500 kB, para o corte cair no meio de uma foto
+    def test_one_line_per_second(self):
+        manager = self.open()
+        for i in range(300):            # 10 Hz por 30 s
+            ts = 1000.0 + i / 10
+            manager.update("imu", {"ax": i}, ts)
+            manager.update("gps", {"lat": -25.4, "lon": -49.2}, ts)
+        rows = manager.pending_telemetry()
+        self.assertEqual(len(rows), 30)
+        self.assertEqual(rows[1]["data"]["imu"], {"ts": 1001.0, "ax": 10})
+        self.assertEqual(set(rows[1]["data"]), {"imu", "gps"})
+        manager.ack_telemetry([row["id"] for row in rows])
+        self.assertEqual(manager.pending_counts(), {"telemetry": 0, "events": 0})
+
+
+class EventTest(Folder):
+
+    def test_event_with_integer_id_ts_in_ms_snapshot_and_photo(self):
+        manager = self.open()
+        manager.update("imu", {"ax": 0.11}, 1000.0)
+        event_id = manager.record_event("fadiga", 0.82, JPEG, 1000.4374)
+        self.assertIsInstance(event_id, int)
+        event, = manager.pending_events()
+        self.assertEqual(event["id"], event_id)
+        self.assertEqual(event["ts"], 1000.437)
+        self.assertEqual((event["type"], event["score"]), ("fadiga", 0.82))
+        self.assertEqual(event["telemetria"], {"imu": {"ts": 1000.0, "ax": 0.11}})
+        self.assertEqual(os.path.basename(event["photo"]), "1000437-fadiga.jpg")
+        with open(event["photo"], "rb") as f:
+            self.assertEqual(f.read(), JPEG)
+        self.assertEqual(manager.pending_counts(), {"telemetry": 1, "events": 1})
+
+    def test_cooldown_of_5_s_per_type(self):
+        manager = self.open()
+        self.assertIsNotNone(manager.record_event("fadiga", 0.9, JPEG, 1000.0))
+        self.assertIsNone(manager.record_event("fadiga", 0.9, JPEG, 1004.9))
+        self.assertIsNotNone(manager.record_event("distracao", 0.7, JPEG, 1004.9))
+        self.assertIsNotNone(manager.record_event("fadiga", 0.9, JPEG, 1005.0))
+        self.assertEqual(len(manager.pending_events()), 3)
+
+    def test_jpeg_is_required(self):
+        manager = self.open()
+        for jpeg in (None, b""):
+            with self.subTest(jpeg=jpeg), self.assertRaises(ValueError):
+                manager.record_event("fadiga", 0.9, jpeg, 1000.0)
+        self.assertEqual(manager.pending_events(), [])
+        self.assertEqual(os.listdir(manager.photo_dir), [])
+
+    def test_snapshot_leaves_out_samples_older_than_3_s(self):
+        manager = self.open()
+        manager.update("gps", {"lat": -25.4}, 996.9)    # 3,1 s antes: fica de fora
+        manager.update("obd", {"rpm": 800.0}, 997.0)    # 3,0 s antes: entra
+        manager.update("imu", {}, 999.5)                # sensor sem dado: só o horário
+        manager.record_event("fadiga", 0.9, JPEG, 1000.0)
+        self.assertEqual(manager.pending_events()[0]["telemetria"],
+                         {"obd": {"ts": 997.0, "rpm": 800.0}, "imu": {"ts": 999.5}})
+
+    def test_snapshot_without_sensors_is_empty(self):
+        manager = self.open()
+        manager.record_event("distracao", 0.7, JPEG, 1000.0)
+        self.assertEqual(manager.pending_events()[0]["telemetria"], {})
+
+    def test_repeated_ts_and_type_keeps_the_photo(self):
+        # Só com o relógio voltando para trás, depois de reiniciar.
+        manager = self.open()
+        manager.record_event("fadiga", 0.9, JPEG, 1000.0)
+        manager.close()
+        manager = self.open()
+        with self.assertLogs("events", "WARNING"):
+            self.assertIsNone(manager.record_event("fadiga", 0.8, JPEG + b"2", 1000.0))
+        event, = manager.pending_events()
+        with open(event["photo"], "rb") as f:
+            self.assertEqual(f.read(), JPEG)
+
+
+class QueueTest(Folder):
+
+    def test_order_ack_confirmed_and_failed(self):
+        manager = self.open()
+        first = manager.record_event("fadiga", 0.9, JPEG, 1000.0)
+        second = manager.record_event("distracao", 0.7, JPEG, 1001.0)
+        third = manager.record_event("fadiga", 0.8, JPEG, 1010.0)
+        self.assertEqual([e["id"] for e in manager.pending_events()], [first, second, third])
+        self.assertEqual([e["id"] for e in manager.pending_events(limit=2)], [first, second])
+        manager.ack_event(first)                # o servidor confirmou
+        manager.ack_event(second, FAILED)       # recusou: sai da fila e fica no cartão
+        self.assertEqual([e["id"] for e in manager.pending_events()], [third])
+        self.assertEqual(manager.pending_counts(), {"telemetry": 0, "events": 1})
+        self.assertEqual(len(os.listdir(manager.photo_dir)), 3)
+
+    def test_power_cut_keeps_the_queue_and_removes_leftovers(self):
+        manager = self.open()
+        manager.update("imu", {"ax": 1}, 1000.0)
+        ids = [manager.record_event("fadiga", 0.9, JPEG, 1000.0),
+               manager.record_event("distracao", 0.7, JPEG, 1000.5)]
+        # Restos de um corte no meio da gravação de uma foto.
+        for name in ("meia-foto.jpg.tmp", "sem-evento.jpg"):
+            with open(os.path.join(manager.photo_dir, name), "wb") as f:
+                f.write(JPEG)
+        reopened = self.open()                  # sem close: como se a energia caísse
+        self.assertEqual([e["id"] for e in reopened.pending_events()], ids)
+        self.assertEqual(sorted(os.listdir(reopened.photo_dir)), ["1000000-fadiga.jpg", "1000500-distracao.jpg"])
+        self.assertEqual(reopened.pending_counts(), {"telemetry": 1, "events": 2})
+
+    def test_cleanup_only_at_the_warning_and_only_what_was_confirmed(self):
+        manager = self.open()
+        manager.update("imu", {"ax": 1}, 1000.0)
+        done = manager.record_event("fadiga", 0.9, JPEG, 1000.0)
+        waiting = manager.record_event("distracao", 0.7, JPEG, 1000.5)
+        manager.ack_event(done)
+        manager.ack_telemetry([row["id"] for row in manager.pending_telemetry()])
+        with patch.multiple(event_manager, STORAGE_WARN=1.01, STORAGE_CRITICAL=1.02):
+            manager.cleanup()                   # abaixo do alerta: nada sai
+        self.assertEqual(len(os.listdir(manager.photo_dir)), 2)
+        with patch.object(event_manager, "STORAGE_WARN", 0.0):
+            manager.cleanup()
+        self.assertEqual(os.listdir(manager.photo_dir), ["1000500-distracao.jpg"])
+        self.assertEqual([e["id"] for e in manager.pending_events()], [waiting])
+        self.assertEqual(manager._db.execute("SELECT COUNT(*) FROM telemetry").fetchone()[0], 0)
+
+
+class OldModelTest(Folder):
+
+    def make_old_model(self, events):
+        """
+        Um banco do modelo antigo, como a bancada deixava, com as fotos. A
+        cópia é feita com a conexão aberta: é o retrato de um corte de
+        energia, com as linhas confirmadas ainda só no -wal.
+        """
+        photo_dir = os.path.join(self.data_dir, "photos")
+        os.makedirs(photo_dir, exist_ok=True)
+        source = tempfile.TemporaryDirectory(prefix="vguard-antigo-")
+        self.addCleanup(source.cleanup)
+        db = sqlite3.connect(os.path.join(source.name, "vguard.db"))
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA wal_autocheckpoint=0")
+        db.executescript(OLD_SCHEMA)
+        sizes = {}
+        with db:
+            for i in range(events):
+                event_id = "8f1c2d3e-0000-4000-8000-%012d" % i
+                db.execute("INSERT INTO events (id, type, ts, score, data, photo) VALUES (?, ?, ?, ?, ?, ?)",
+                           (event_id, "fadiga", 1000.0 + 10 * i, 0.9, "{}", event_id + ".jpg"))
+                db.execute("INSERT INTO event_window VALUES (?, ?, ?, ?)", (event_id, 1000.0, "imu", "{}"))
+                content = JPEG * (i + 1)
+                with open(os.path.join(photo_dir, event_id + ".jpg"), "wb") as f:
+                    f.write(content)
+                sizes[event_id + ".jpg"] = len(content)
+        self.assertGreater(os.path.getsize(os.path.join(source.name, "vguard.db-wal")), 0)
+        for name in ("vguard.db", "vguard.db-wal"):
+            shutil.copy(os.path.join(source.name, name), os.path.join(self.data_dir, name))
+        db.close()
+        return sizes
+
+    def old_counts(self, name):
+        db = sqlite3.connect(os.path.join(self.data_dir, name))
+        try:
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            return [db.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0] for table in ("events", "event_window")]
+        finally:
+            db.close()
+
+    def test_old_model_goes_aside_whole(self):
+        sizes = self.make_old_model(events=3)
+        with open(os.path.join(self.data_dir, "photos", "meia.jpg.tmp"), "wb") as f:
+            f.write(JPEG)                       # um resto de corte vai junto, sem ser apagado
+        with self.assertLogs("events", "WARNING") as logs:
+            manager = self.open()
+        self.assertEqual(logs.output, ["WARNING:events:banco do modelo antigo movido para vguard-antigo.db e "
+                                       "photos-antigo/ (3 eventos, 3 fotos); nada foi apagado"])
+        old = os.path.join(self.data_dir, "photos-antigo")
+        self.assertEqual({name: os.path.getsize(os.path.join(old, name))
+                          for name in os.listdir(old) if name.endswith(".jpg")}, sizes)
+        self.assertIn("meia.jpg.tmp", os.listdir(old))
+        self.assertEqual(self.old_counts("vguard-antigo.db"), [3, 3])
+        # O banco novo começa vazio, no modelo novo, e não vai para o lado de novo.
+        self.assertEqual(manager.pending_events(), [])
+        self.assertEqual(os.listdir(manager.photo_dir), [])
+        self.assertEqual(manager._db.execute("PRAGMA user_version").fetchone()[0], 1)
+        manager.close()
+        self.open()
+        self.assertEqual([name for name in self.names() if "antigo" in name], ["photos-antigo", "vguard-antigo.db"])
+
+    def test_second_old_model_never_overwrites_the_first(self):
+        self.make_old_model(events=1)
+        with self.assertLogs("events", "WARNING") as logs:
+            self.open().close()
+        self.assertIn("(1 evento, 1 foto)", logs.output[0])
+        first = os.path.join(self.data_dir, "vguard-antigo.db")
+        size = os.path.getsize(first)
+        # Outro banco antigo na mesma pasta (copiado de outra pasta, por exemplo).
+        for name in ("vguard.db", "vguard.db-wal", "vguard.db-shm"):
+            if os.path.exists(os.path.join(self.data_dir, name)):
+                os.remove(os.path.join(self.data_dir, name))
+        shutil.rmtree(os.path.join(self.data_dir, "photos"))
+        self.make_old_model(events=2)
+        with self.assertLogs("events", "WARNING") as logs:
+            self.open()
+        stamped = [name for name in self.names() if re.fullmatch(r"vguard-antigo-\d{8}-\d{6}\.db", name)]
+        self.assertEqual(len(stamped), 1, self.names())
+        self.assertIn(stamped[0].replace("vguard", "photos")[:-3], self.names())
+        self.assertIn("(2 eventos, 2 fotos)", logs.output[0])
+        self.assertEqual(os.path.getsize(first), size)
+        self.assertEqual(self.old_counts("vguard-antigo.db"), [1, 1])
+        self.assertEqual(self.old_counts(stamped[0]), [2, 2])
+
+    def test_file_without_tables_only_gets_the_new_schema(self):
+        open(os.path.join(self.data_dir, "vguard.db"), "wb").close()
+        manager = self.open()
+        self.assertFalse([name for name in self.names() if "antigo" in name])
+        self.assertEqual(manager._db.execute("PRAGMA user_version").fetchone()[0], 1)
+
+
+class AbruptCutTest(Folder):
+    """
+    O SIGKILL corta o processo, não a energia: valida a recuperação do banco
+    e das fotos, mas não o fsync.
+    """
+
+    def test_sigkill_while_writing(self):
+        for _ in range(8):
+            process = subprocess.Popen([sys.executable, "-B", os.path.abspath(__file__), "writer", self.data_dir])
+            time.sleep(random.uniform(0.5, 1.2))
+            self.assertIsNone(process.poll(), "o gravador saiu sozinho")
+            process.send_signal(signal.SIGKILL)
+            process.wait()
+            events = check(self.data_dir)
+        self.assertGreater(events, 0)
+        total = sum(os.path.getsize(os.path.join(root, name))
+                    for root, _, names in os.walk(self.data_dir) for name in names)
+        self.assertLess(total, 50 * 1024 * 1024)    # poucos MB, e não os ~3 GB de antes
 
 
 def writer(data_dir):
-    """
-    Grava telemetria e eventos sem parar, até ser morto.
-    """
+    """Grava telemetria e eventos sem parar, até ser morto."""
     manager = EventManager(data_dir)
+    # Continua de onde a rodada anterior parou: cada evento tem um ts novo.
+    start = manager._db.execute("SELECT COALESCE(MAX(ts), 0) FROM telemetry").fetchone()[0]
     i = 0
-
     while True:
         i += 1
-        manager.update("imu", {"ax": i}, i * 0.1)
-
-        if i % 60 == 0:
-            manager.record_event("fadiga", 0.9, BIG_JPEG, i * 0.1)
-
-
-def test_abrupt_cut(rounds=10):
-    # SIGKILL corta o processo, não a energia: valida a recuperação
-    # do banco e das fotos, mas não o fsync. O corte real é puxar a fonte da
-    # Raspberry com este writer rodando e depois conferir com check().
-    data_dir = tempfile.mkdtemp()
-
-    for _ in range(rounds):
-        process = subprocess.Popen(
-            [sys.executable, __file__, "writer", data_dir]
-        )
-        time.sleep(random.uniform(0.3, 1.0))
-        assert process.poll() is None
-        process.send_signal(signal.SIGKILL)
-        process.wait()
-
-        events = check(data_dir)
-
-    assert events > 0
-    print("OK: %d cortes, %d eventos íntegros" % (rounds, events))
+        ts = start + i * 0.1
+        manager.update("imu", {"ax": i}, ts)
+        if i % 50 == 0:
+            manager.record_event("fadiga", 0.9, BIG_JPEG, ts)
+        time.sleep(0.001)       # sem a pausa, o teste antigo gravava ~3 GB (08/11)
 
 
 def check(data_dir):
-    """
-    Reabre o diretório e confere que tudo que ficou está íntegro.
-    """
+    """Reabre a pasta e confere que tudo o que ficou está íntegro. Devolve o número de eventos."""
     manager = EventManager(data_dir)
-    db = manager._db
-
-    assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-
-    # Toda foto no disco pertence a um evento, e vice-versa, inteira.
-    photos = [r[0] for r in db.execute("SELECT photo FROM events")]
-    assert sorted(os.listdir(manager.photo_dir)) == sorted(photos)
-    for name in photos:
-        assert os.path.getsize(
-            os.path.join(manager.photo_dir, name)
-        ) == len(BIG_JPEG)
-
-    # A fila volta inteira: todo evento gravado está pendente.
-    counts = manager.pending_counts()
-    assert counts["events"] == counts["photos"] == len(photos)
-    assert len(manager.pending_events(limit=10**6)) == len(photos)
-
-    manager.close()
-    return len(photos)
+    try:
+        db = manager._db
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        # Toda foto no disco pertence a um evento, e vice-versa, inteira.
+        photos = [row[0] for row in db.execute("SELECT photo FROM events")]
+        assert sorted(os.listdir(manager.photo_dir)) == sorted(photos)
+        for name in photos:
+            assert os.path.getsize(os.path.join(manager.photo_dir, name)) == len(BIG_JPEG)
+        # A fila volta inteira: todo evento gravado está pendente.
+        assert manager.pending_counts()["events"] == len(photos)
+        assert len(manager.pending_events(limit=10**6)) == len(photos)
+        return len(photos)
+    finally:
+        manager.close()
 
 
 if __name__ == "__main__":
@@ -192,5 +351,4 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["check"]:
         print("OK: %d eventos íntegros" % check(sys.argv[2]))
     else:
-        main()
-        test_abrupt_cut()
+        unittest.main()

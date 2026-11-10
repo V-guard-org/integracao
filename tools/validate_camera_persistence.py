@@ -99,9 +99,8 @@ def main():
         assert len(events) == 1, len(events)
         event = events[0]
         assert event["type"] == manifest["event_type"]
-        assert event["meta_synced"] == event["photo_synced"] == 0
-        assert event["window_closed"] == 1
-        assert json.loads(event["data"]) == {}
+        assert event["synced"] == 0
+        assert json.loads(event["telemetria"]) == {}
     finally:
         db.close()
     photo = data / "photos" / event["photo"]

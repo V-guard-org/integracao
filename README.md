@@ -39,15 +39,16 @@ O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só
 3. **VisionProcess** (thread do principal, `events/vision_process.py`) lê o canal, chama o
    `record_event` do **EventManager**, acompanha o `vision_fps` e reinicia a visão se ela cair
    ([a visão num processo filho](#a-visão-num-processo-filho)).
-4. **EventManager** anexa a última amostra de cada sensor, grava a foto e a linha no SQLite
-   e guarda a janela de telemetria de 10 s antes e 10 s depois do evento (RF17).
+4. **EventManager** anexa o retrato da telemetria (a última amostra de cada sensor, menos as com
+   mais de 3 s), grava a foto e depois a linha no SQLite ([o que fica no SD](#o-que-fica-no-sd)).
 5. **Esp32Reader** (thread) lê as linhas de texto do ESP32 pela USB (`$A`, `$O`, `$S`...), confere o
    checksum e a `seq`, manda a hora (`$H`) e a taxa do OBD (`$C`) e alimenta `manager.update()` com
    IMU e OBD-II. As amostras só entram depois de 10 linhas válidas seguidas. Ver [o leitor do ESP32](#leitor-do-esp32).
 6. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
    em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
-7. **Sync** (thread) envia a cada 60 s o que está pendente: metadados, telemetria e fotos por 4G ou Wi-Fi
-   (as fotos vão por último e, se falharem, atrasam só a si mesmas). Um item só é marcado como enviado depois do 2xx do backend (RF22).
+7. **Sync** (thread) envia a cada 60 s a saúde e a telemetria pendente, pelo HTTP antigo, por 4G ou
+   Wi-Fi. Um item só é marcado como enviado depois do 2xx do backend (RF22). Os eventos esperam no
+   SQLite pelo `POST /api/events` do ticket 3.
 8. **PiMonitor** (thread) lê a temperatura e o `throttled` da Pi a cada 10 s e os escreve no log
    ([o que aparece no log](#o-que-aparece-no-log)). Os valores ficam guardados para a saúde.
 
@@ -321,12 +322,28 @@ python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 20 --no-clock   # sem
 
 ```
 dados/
-├── vguard.db          SQLite: telemetry, events, event_window
-└── photos/<id>.jpg    foto de cada evento
+├── vguard.db                       SQLite: telemetry (1 linha por segundo) e events
+└── photos/<ts em ms>-<tipo>.jpg    a foto de cada evento, como 1793980812437-fadiga.jpg
 ```
 
-Cada evento guarda `type`, `ts`, `score`, `data` (última amostra de `imu`/`obd`/`gps`)
-e os estados de sincronização separados: `meta_synced` e `photo_synced` (RF18).
+Cada evento é o que vai ao servidor no `POST /api/events` (contrato com o servidor, ticket 3):
+
+- `id`: o id local, inteiro;
+- `ts`: o instante do quadro, ao milissegundo. A chave no servidor é `(device_id, ts, type)`;
+- `type` (`fadiga` ou `distracao`) e `score`;
+- `telemetria`: o retrato, com a última amostra de cada sensor e o `ts` dela, menos as com mais de 3 s.
+  Pode ser `{}`;
+- `photo`: o nome da foto, gravada antes da linha no banco;
+- `synced`: um estado de envio só, porque o evento e a foto vão juntos.
+
+**Banco do modelo antigo** (UUID e janela de 10 s, até 09/11). Na primeira abertura, ele vai para o lado
+com as fotos, sem converter e sem apagar nada: `vguard-antigo.db` e `photos-antigo/`. Se esses nomes já
+existirem, os novos levam a data e a hora (`vguard-antigo-20261110-010533.db`). Uma linha de aviso no log
+diz quantos eventos e fotos foram:
+
+```text
+WARNING events: banco do modelo antigo movido para vguard-antigo.db e photos-antigo/ (412 eventos, 398 fotos); nada foi apagado
+```
 
 ## Testes
 

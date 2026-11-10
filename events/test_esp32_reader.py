@@ -20,6 +20,8 @@ import serial_port
 from esp32_reader import Esp32Link, Esp32Reader, frame, parse_line, parse_obd_hz
 from event_manager import EventManager
 
+JPEG = b"\xff\xd8\xff\xe0 foto de teste \xff\xd9"
+
 WALL = 1793980812.0   # time.time() inventado, 2026-11-07
 
 
@@ -453,7 +455,9 @@ class FakeEsp32OnPty(unittest.TestCase):
 
     def test_reader_and_event_manager(self):
         serial_port.REOPEN_S = 0.2
-        data_dir = tempfile.mkdtemp()
+        folder = tempfile.TemporaryDirectory(prefix="vguard-teste-")
+        self.addCleanup(folder.cleanup)
+        data_dir = folder.name
         manager = EventManager(data_dir)
         master, slave = pty.openpty()
         reader = Esp32Reader(manager, os.ttyname(slave), clock_ok=lambda: True, obd_hz="12.5")
@@ -489,12 +493,12 @@ class FakeEsp32OnPty(unittest.TestCase):
                 time.sleep(max(0, start + (tick + 1) * 0.02 - time.monotonic()))
                 read_master(0)
             self.assertEqual(reader.health(), {"connected": True, "lost": 0, "corrupt": 0})
-            event = manager.record_event("fadiga", 0.9)
+            event = manager.record_event("fadiga", 0.9, JPEG)
 
             # O ESP32 some: 3 s depois, connected falso.
             time.sleep(3.3)
             self.assertFalse(reader.health()["connected"])
-            gone = manager.record_event("distracao", 0.9)
+            gone = manager.record_event("distracao", 0.9, JPEG)
         finally:
             reader.stop()
             os.close(master)
@@ -506,7 +510,9 @@ class FakeEsp32OnPty(unittest.TestCase):
         # A primeira linha é a do primeiro update (o EventManager grava na hora).
         self.assertTrue(all({"imu", "obd"} <= set(r["data"]) for r in rows[1:3]))
 
-        events = {e["id"]: e["data"] for e in EventManager(data_dir).pending_events()}
+        reopened = EventManager(data_dir)
+        events = {e["id"]: e["telemetria"] for e in reopened.pending_events()}
+        reopened.close()
         self.assertEqual(set(events[event]["obd"]) - {"ts", "age_ms"}, set(fields))
         # Com o ESP32 desaparecido, o evento não leva valor antigo: só o horário.
         self.assertEqual((set(events[gone]["imu"]), set(events[gone]["obd"])), ({"ts"}, {"ts"}))

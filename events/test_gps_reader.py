@@ -14,6 +14,8 @@ from functools import reduce
 from event_manager import EventManager
 from gps_reader import GpsReader, parse_rmc
 
+JPEG = b"\xff\xd8\xff\xe0 foto de teste \xff\xd9"
+
 
 def nmea(body):
     """Acrescenta o $ e o checksum, como o receptor faz."""
@@ -44,7 +46,11 @@ def test_parse_rmc():
 
 
 def test_with_fake_receiver():
-    data_dir = tempfile.mkdtemp()
+    with tempfile.TemporaryDirectory(prefix="vguard-teste-") as data_dir:
+        fake_receiver(data_dir)
+
+
+def fake_receiver(data_dir):
     manager = EventManager(data_dir)
     master, slave = pty.openpty()
 
@@ -61,18 +67,20 @@ def test_with_fake_receiver():
         time.sleep(0.2)
         os.write(master, line[20:])
         time.sleep(0.5)
-        with_fix = manager.record_event("fadiga", 0.9)
+        with_fix = manager.record_event("fadiga", 0.9, JPEG)
 
         os.write(master, nmea(NO_FIX).encode())
         time.sleep(0.5)
-        without_fix = manager.record_event("distracao", 0.9)
+        without_fix = manager.record_event("distracao", 0.9, JPEG)
     finally:
         reader.stop()
         os.close(master)
         os.close(slave)
 
     manager.close()
-    events = {e["id"]: e["data"] for e in EventManager(data_dir).pending_events()}
+    reopened = EventManager(data_dir)
+    events = {e["id"]: e["telemetria"] for e in reopened.pending_events()}
+    reopened.close()
 
     gps = events[with_fix]["gps"]
     assert (gps["lat"], gps["lon"], gps["speed"]) == (-25.443, -49.261, 18.5)

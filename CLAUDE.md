@@ -13,7 +13,6 @@ Seções principais: §5 (serial ESP32 ↔ Pi), §6 (Raspberry Pi), §6.8 (o que
 - Nomes em inglês, como no resto do repositório (`update()`, `record_event()`, `EventManager`). Comentários e docstrings em português.
 - O código precisa rodar no Python 3.11, o da visão com o MediaPipe 0.10.18 (README), e no 3.13 do sistema da Pi, o do programa principal. O `vguard.py`, o `events/`, o `vision/options.py` e o `vision/protocol.py` usam só a biblioteca padrão: o principal não importa o OpenCV, o MediaPipe nem o NumPy, e o `test_vguard.py` confere isso.
 - Cada arquivo de teste roda sozinho, a partir da própria pasta: `cd events && python3 test_esp32_reader.py`. Os testes da `vision/` precisam da visão instalada (OpenCV e MediaPipe), menos o `test_protocol.py`. O `test_vguard.py`, os do `events/` e o `tools/test_vision_bench.py` rodam também no 3.13 do sistema.
-- O `events/test_event_manager.py` grava ~3 GB de eventos de teste numa pasta temporária e não a apaga. Rode com `TMPDIR` apontando para uma pasta que você apaga depois.
 
 ## Fluxo por ticket
 
