@@ -47,9 +47,11 @@ O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só
 6. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
    em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
 7. **Sync** (thread) envia a cada 60 s a saúde e a telemetria pendente, pelo HTTP antigo, por 4G ou
-   Wi-Fi. Um item só é marcado como enviado depois do 2xx do backend (RF22). Os eventos esperam no
-   SQLite pelo `POST /api/events` do ticket 3.
-8. **PiMonitor** (thread) lê a temperatura e o `throttled` da Pi a cada 10 s e os escreve no log
+   Wi-Fi. Um item só é marcado como enviado depois do 2xx do backend (RF22).
+8. **EventSender** (thread, `events/event_sender.py`) manda cada evento ao servidor num
+   `POST /api/events`, com a foto junto, logo depois da detecção. Sem enlace ou com o servidor fora,
+   o evento espera no cartão ([o envio dos eventos](#o-envio-dos-eventos)).
+9. **PiMonitor** (thread) lê a temperatura e o `throttled` da Pi a cada 10 s e os escreve no log
    ([o que aparece no log](#o-que-aparece-no-log)). Os valores ficam guardados para a saúde.
 
 ### A visão num processo filho
@@ -234,11 +236,22 @@ INFO vision.process: visão de volta depois de 1 tentativa (6 s fora)
 ERROR vision.process: visão: erro de configuração (código 78): sem reinício; a telemetria continua
 ```
 
-- **Ao encerrar** (SIGTERM, Ctrl+C ou o fim normal da visão), uma linha de resumo. A média é a
-  dos `fps` da visão, e a parte do ESP32 só aparece com ele ligado:
+- **`events.sender`** (o envio dos eventos):
 
 ```
-INFO vguard: resumo: visão 13.8 FPS em média; eventos: fadiga 1, distracao 1; visão reiniciada 0 vezes; ESP32: lost 0, corrupt 0; Pi até 61.2 °C, throttled sem avisos
+INFO events.sender: evento 12 enviado (fadiga, 46 KB, 0.8 s)
+WARNING events.sender: envio de eventos falhou (HTTP 503); nova tentativa em 60 s
+INFO events.sender: envio de eventos de volta depois de 3 tentativas
+WARNING events.sender: servidor recusou o evento 12 (HTTP 400): fica no cartão
+ERROR events.sender: token recusado (HTTP 401): confira o VGUARD_TOKEN; nova tentativa em 60 s
+INFO events.sender: envio de eventos: sem enlace; 2 eventos esperam no cartão
+```
+
+- **Ao encerrar** (SIGTERM, Ctrl+C ou o fim normal da visão), uma linha de resumo. A média é a
+  dos `fps` da visão. A parte do ESP32 só aparece com ele ligado, e a do envio, sem o `--no-sync`:
+
+```
+INFO vguard: resumo: visão 13.8 FPS em média; eventos: fadiga 1, distracao 1; visão reiniciada 0 vezes; ESP32: lost 0, corrupt 0; envio: 2 eventos enviados, 0 pendentes; Pi até 61.2 °C, throttled sem avisos
 ```
 
 ### Bancada guiada da visão (passo 0 e passo C)
@@ -290,9 +303,9 @@ inteiro, e um `| tee` morreria junto, antes de escrever o resumo.
 | `VGUARD_VISION_PYTHON` | o venv 3.11 da Pi; sem ele, o Python do principal | O Python do programa da visão |
 | `VGUARD_PYTHON`  | o `venv-principal`; sem ele, o `.venv` ou o atual | O Python do principal nas ferramentas (`tools/`) |
 | `VGUARD_GPS_BAUD`| `9600`                       | Velocidade da UART do GNSS            |
-| `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend                        |
-| `VGUARD_DEVICE`  | `vguard-01`                  | Identificador do dispositivo          |
-| `VGUARD_TOKEN`   | vazio                        | Token de autenticação no backend      |
+| `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend; os eventos vão a `<URL>/events` |
+| `VGUARD_DEVICE`  | `vguard-01`                  | Identificador do dispositivo (`X-Device-Id`) |
+| `VGUARD_TOKEN`   | vazio                        | Token de autenticação no backend (`Authorization: Bearer`) |
 
 As redes Wi-Fi autorizadas ficam em `AUTHORIZED_WIFI` em `events/sync.py`.
 Os limiares da visão (EAR, MAR, yaw, pitch e tempos) ficam em `vision/config.py`.
@@ -319,6 +332,49 @@ python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 600      # 10 min, re
 python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 30 --obd-hz 5
 python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 20 --no-clock   # sem $H
 ```
+
+## O envio dos eventos
+
+O `EventSender` (`events/event_sender.py`, ticket 3) manda cada evento ao servidor como o contrato pede:
+
+```
+POST <VGUARD_BACKEND>/events
+Authorization: Bearer <VGUARD_TOKEN>
+X-Device-Id: <VGUARD_DEVICE>
+multipart/form-data: dados (JSON: ts, type, score, telemetria) + foto (JPEG)
+```
+
+- **Quando:** logo depois de cada evento gravado (o `EventManager` avisa), um por vez, do mais antigo
+  ao mais novo. Os pendentes de antes (de outra execução) saem no começo.
+- **O enlace** é o do `sync.py` (`active_link()`): o Wi-Fi autorizado ou o 4G do modem no modo placa de
+  rede (`usb0`). Sem enlace, o evento espera no cartão, e o enlace é conferido de novo a cada 60 s ou
+  a cada evento novo.
+- **As respostas:**
+
+| Resposta | O evento | Depois |
+|---|---|---|
+| 200 (gravado, ou já existia) | confirmado: sai da fila | a espera volta a 60 s |
+| 400 ou 413 | recusado (`FAILED`): sai da fila e fica no cartão | segue para o próximo |
+| 401 | continua pendente (o token está errado) | a espera crescente |
+| 5xx, sem resposta em 30 s ou erro de rede | continua pendente | 60 s, dobrando até 10 min |
+
+  Durante a espera depois de uma falha, um evento novo não acorda o envio: ele sai junto com os
+  outros, no fim da espera, para não gastar a franquia do 4G.
+- **A foto apagada do cartão** à mão vira `FAILED`, para não travar a fila.
+- **O `--no-sync`** desliga o envio, junto com o `Sync`.
+
+**Servidor falso** (`events/fake_server.py`), para os testes e a bancada. Ele confere o pedido como o
+contrato manda, guarda cada evento pela chave `(device_id, ts, type)` num `eventos.jsonl`, com a foto
+ao lado, e responde 200 sem duplicar num reenvio, também depois de reiniciado. Aceita também o
+`/health` e o `/telemetry` do `Sync`:
+
+```bash
+python3 events/fake_server.py --dir /home/vguard/vguard/servidor-falso      # http://127.0.0.1:8000/api
+.venv/bin/python tools/vision_bench.py --passo-c --server                   # noutro terminal
+```
+
+Com o `--server`, a bancada guiada roda o principal sem o `--no-sync`, manda os eventos ao servidor
+(o falso, por padrão) e confere no fim que nenhum ficou pendente.
 
 ## O que fica no SD
 
@@ -359,7 +415,7 @@ python3 -B vision/test_calibration.py
 ```
 
 ```bash
-(cd events && python3 test_event_manager.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py && python3 test_pi_monitor.py && python3 test_vision_process.py)
+(cd events && python3 test_event_manager.py && python3 test_event_sender.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py && python3 test_pi_monitor.py && python3 test_vision_process.py)
 python3 -B test_vguard.py
 (cd tools && python3 test_vision_bench.py)
 ```

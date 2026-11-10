@@ -7,7 +7,8 @@ V-GUARD — o programa principal da Raspberry Pi (proposta §6.1 e §6.9).
                VisionProcess --record_event()--> EventManager --> SD
     ESP32  --> Esp32Reader   --update()-------------->      |
     GNSS   --> GpsReader     --update()-------------->      |
-                                     Sync <--pending_*/ack_*--+
+                              EventSender <--pending_events--+--> POST /api/events, com a foto
+                                     Sync <--pending_telemetry--+--> saúde e telemetria (HTTP antigo)
     Pi     --> PiMonitor: temperatura e throttled no log, a cada 10 s
 
 O principal roda no Python 3.13 do sistema (o venv-principal) e não importa o
@@ -33,6 +34,7 @@ sys.path[:0] = [os.path.join(HERE, "events"), os.path.join(HERE, "vision")]
 
 from esp32_reader import Esp32Reader
 from event_manager import EventManager
+from event_sender import EventSender
 from gps_reader import GpsReader
 from pi_monitor import PiMonitor
 from sync import Sync
@@ -64,6 +66,7 @@ def run(argv=None):
     reader = None
     gps = None
     sync = None
+    sender = None
     vision = None
     monitor = PiMonitor()
 
@@ -78,6 +81,8 @@ def run(argv=None):
         if not args.no_sync:
             sync = Sync(manager)
             sync.start()
+            sender = EventSender(manager)
+            sender.start()
         vision = VisionProcess(manager, vision_options.to_argv(args))
         vision.start()
         # Até a visão terminar normalmente. Num erro de configuração ela não volta,
@@ -90,14 +95,17 @@ def run(argv=None):
         # Primeiro a visão (SIGTERM, até 5 s, kill); depois o resto; por último o banco.
         if vision is not None:
             vision.stop()
-        for worker in (reader, gps, sync, monitor):
+        for worker in (reader, gps, sync, sender, monitor):
             if worker is not None:
                 worker.stop()
+        sent = sender.summary() if sender is not None else None     # antes de fechar o banco
         manager.close()
         if vision is not None:
             parts = [vision.summary()]
             if reader is not None:
                 parts.append(f"ESP32: lost {reader.link.lost}, corrupt {reader.link.corrupt}")
+            if sent:
+                parts.append(sent)
             parts.append(monitor.summary())
             log.info("resumo: %s", "; ".join(parts))
 

@@ -198,6 +198,10 @@ class EventManager:
         self._last_flush = 0.0
         self._last_event = {}   # tipo -> ts do último evento
 
+        # Ligado a cada evento gravado: o envio (EventSender) espera nele para
+        # mandar o evento logo depois da detecção (ticket 3).
+        self.event_recorded = threading.Event()
+
     # --------------------------------------------------------
     # TELEMETRIA
     # --------------------------------------------------------
@@ -277,6 +281,7 @@ class EventManager:
                     (ts, type, float(score), json.dumps(snapshot), photo)
                 )
             self._last_event[type] = ts
+            self.event_recorded.set()
             return cursor.lastrowid
 
     def _write_photo(self, name, jpeg):
