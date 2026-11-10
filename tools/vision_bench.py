@@ -1,10 +1,11 @@
 """
 Bancada guiada da visão: o passo 0 (Issue #6) e o passo C (Issue #10). Roda
-o programa principal sem tela por 10 min (vguard.py --headless, com a visão
-num processo filho) e mostra numa janela da Pi, em letra grande, o que quem
-lê a tela deve pedir agora a quem está na frente da câmera: olhar para a
-frente, bocejar ou virar o rosto. Cada pedido espera o evento aparecer no log
-e mostra OK assim que ele chega.
+o programa principal sem tela (vguard.py --headless, com a visão num processo
+filho) e mostra numa janela da Pi, em letra grande, o que quem lê a tela deve
+pedir agora a quem está na frente da câmera: olhar para a frente, bocejar ou
+virar o rosto. Cada pedido espera o evento aparecer no log e mostra OK assim
+que ele chega. Depois do último pedido, o N termina a bancada (Issue #12);
+sem ele, ela acaba sozinha nos 10 min.
 
     .venv/bin/python tools/vision_bench.py                    # passo 0: só a visão
     .venv/bin/python tools/vision_bench.py --passo-c          # passo C: com o ESP32 e o kill -9
@@ -18,9 +19,10 @@ maior age_ms abaixo de 1 s e o lost/corrupt do ESP32 em 0.
 
 O principal roda no Python dele (VGUARD_PYTHON, o venv-principal ou o atual) e
 a visão no dela (VGUARD_VISION_PYTHON). Roda na tela da Pi, pelo Raspberry Pi
-Connect; a janela só lê o log. Teclas: ESPAÇO começa os 10 min, N adianta o
-passo (ou pula o pedido atual) e Q encerra antes. O log inteiro vai para o
-terminal e para <dados>/bancada-visao-<data>.log.
+Connect; a janela só lê o log. Teclas: ESPAÇO começa; N adianta o passo, pula
+o pedido atual ou, depois do último pedido, termina a bancada; Q interrompe,
+com o fim "CONFERIR". O log inteiro vai para o terminal e para
+<dados>/bancada-visao-<data>.log.
 
 Sai com o código 1 se algum critério não passou.
 """
@@ -110,6 +112,7 @@ class Script:
         self.phase_start = None
         self.results = {}      # evento esperado -> "OK", "FALHOU" ou "PULADO"
         self.outside = []      # (tipo, quando) dos eventos fora de um pedido
+        self.terminated = False    # o N terminou a última parte antes do máximo
 
     # ------------------------------------------------------------ estado
 
@@ -171,8 +174,14 @@ class Script:
             self.outside.append((event_type, now))
 
     def skip(self, now):
-        """Tecla N: adianta a fase atual; num pedido, marca como pulado."""
-        if self.phase == "normal" and not self.last_step:
+        """
+        Tecla N: adianta a fase atual; num pedido, marca como pulado. Na última
+        parte, sem mais nada a pedir, termina a bancada (Issue #12).
+        """
+        if self.phase == "normal" and self.last_step:
+            if now < self.end:
+                self.end, self.terminated = now, True
+        elif self.phase == "normal":
             self._enter(self.index + 1, "prep", now)
         elif self.phase == "prep":
             self._enter(self.index, "ask", now)
@@ -200,9 +209,9 @@ class Script:
         elapsed = now - self.phase_start
         if self.phase == "normal":
             if self.last_step:
-                return {"title": "OLHE PARA A FRENTE", "color": GREEN,
-                        "detail": "Ultima parte: nada mais a pedir.",
-                        "footer": "Fim em %s" % clock(max(0.0, self.end - now))}
+                return {"title": "PEDIDOS FEITOS", "color": GREEN,
+                        "detail": "N: terminar a bancada agora.",
+                        "footer": "Ou fim sozinho em %s" % clock(max(0.0, self.end - now))}
             following = self.steps[self.index + 1]
             left = min(self.normal_s - elapsed, self.end - now)
             return {"title": "OLHE PARA A FRENTE", "color": GREEN,
@@ -232,6 +241,14 @@ class Script:
             return "Bancada da visao (%s): %s sem tela" % (self.name, clock(self.total_s))
         return "Passo %d de %d     %s / %s" % (
             self.index + 1, len(self.steps), clock(min(now, self.end) - self.start), clock(self.total_s))
+
+    def keys_line(self):
+        """A linha das teclas, embaixo da janela."""
+        if not self.started:
+            return "ESPACO: comecar     Q: sair"
+        if self.phase == "normal" and self.last_step:
+            return "N: terminar     Q: interromper"
+        return "N: adiantar     Q: interromper"
 
     def recent_outside(self, now, window_s=6.0):
         """O último evento fora de um pedido, se foi há pouco (para avisar na tela)."""
@@ -375,6 +392,17 @@ def telemetry_report(rows, start, end, kill_at=None):
     }
 
 
+def ending(script, crashed, interrupted):
+    """Como a bancada acabou, para a linha da duração no terminal."""
+    if crashed:
+        return "o principal saiu antes"
+    if interrupted:
+        return "interrompida com o Q"
+    if script.terminated:
+        return "terminada com o N"
+    return "fim pelo tempo"
+
+
 def criteria(summary, telemetry, script, seconds, esp32=False, kill=False):
     """Os critérios da bancada: [(nome, passou, valor)]."""
     def fmt(value, pattern):
@@ -447,21 +475,20 @@ def draw(cv2, np, script, status, now):
         y += 30
     if status["problem"]:
         _put(cv2, img, status["problem"], 515, 0.5, BGR[RED], 1, x=20)
-    keys = "ESPACO: comecar     Q: encerrar" if not script.started else "N: adiantar     Q: encerrar"
-    _put(cv2, img, keys, HEIGHT - 8, 0.5, GRAY, 1, x=WIDTH - 360)
+    _put(cv2, img, script.keys_line(), HEIGHT - 8, 0.5, GRAY, 1, x=WIDTH - 360)
     return img
 
 
-def draw_final(cv2, np, items, status, crashed, stopped_early):
+def draw_final(cv2, np, items, status, crashed, interrupted):
     img = np.full((HEIGHT, WIDTH, 3), BACKGROUND, np.uint8)
-    ok = all(passed for _, passed, _ in items) and not crashed and not stopped_early
+    ok = all(passed for _, passed, _ in items) and not crashed and not interrupted
     _put(cv2, img, "FIM: PASSOU" if ok else "FIM: CONFERIR", 90, 1.8, BGR[GREEN if ok else RED], 5)
     y = 150
     if crashed:
         _put(cv2, img, "O programa principal saiu antes do fim.", y, 0.6, BGR[RED], 1, x=20)
         y += 28
-    if stopped_early:
-        _put(cv2, img, "Bancada encerrada antes do fim (Q).", y, 0.6, BGR[RED], 1, x=20)
+    if interrupted:
+        _put(cv2, img, "Bancada interrompida (Q).", y, 0.6, BGR[RED], 1, x=20)
         y += 28
     for name, passed, value in items:
         _put(cv2, img, "%-6s %s: %s" % ("OK" if passed else "FALHOU", name, value), y, 0.6,
@@ -524,7 +551,8 @@ def parse_args(argv=None):
     parser.add_argument("--calibration-file", help="perfil do motorista (padrão: <dados>/calibration-driver.json)")
     parser.add_argument("--source", default="0", help="câmera, como no vguard.py (padrão: %(default)s)")
     parser.add_argument("--seconds", type=float, default=600,
-                        help="duração da bancada, a partir do ESPAÇO (padrão: %(default)s)")
+                        help="duração máxima, a partir do ESPAÇO; depois do último pedido, o N "
+                             "termina antes (padrão: %(default)s)")
     parser.add_argument("--normal", type=float, default=120,
                         help="segundos olhando para a frente antes de cada pedido (padrão: %(default)s)")
     parser.add_argument("--ask-timeout", type=float, default=60,
@@ -588,7 +616,7 @@ def main(argv=None):
     cv2.moveWindow(window, *PLACE)
 
     launched = time.monotonic()
-    crashed = stopped_early = False
+    crashed = interrupted = False
     try:
         while True:
             if _drain(lines, script, status):
@@ -615,7 +643,7 @@ def main(argv=None):
             elif key in (ord("n"), ord("N")) and script.started:
                 script.skip(time.monotonic())
             elif key in (ord("q"), ord("Q")):
-                stopped_early = True
+                interrupted = True
                 break
     finally:
         ended_wall = time.time()
@@ -634,8 +662,9 @@ def main(argv=None):
     telemetry = telemetry_report(read_telemetry(args.data), started_wall or ended_wall, ended_wall, killed_wall)
     items = criteria(parse_summary(status["summary"]), telemetry, script, measured,
                      esp32=bool(args.esp32), kill=args.kill_vision)
-    print("\nBancada da visão (%s): %s de %s (principal rodando por %s)" % (
-        script.name, clock(measured), clock(args.seconds), clock(time.monotonic() - launched)))
+    print("\nBancada da visão (%s): %s, %s (máximo %s; principal rodando por %s)" % (
+        script.name, clock(measured), ending(script, crashed, interrupted), clock(args.seconds),
+        clock(time.monotonic() - launched)))
     print("O principal saiu antes do fim: %s (código %s)" % ("sim" if crashed else "não", child.returncode))
     for name, passed, value in items:
         print("  %-6s %s: %s" % ("OK" if passed else "FALHOU", name, value))
@@ -643,13 +672,13 @@ def main(argv=None):
     print("Resumo: %s" % (status["summary"] or "não chegou"))
     print("Log: %s" % log_path)
 
-    show(draw_final(cv2, np, items, status, crashed, stopped_early))
+    show(draw_final(cv2, np, items, status, crashed, interrupted))
     while cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) >= 1:
         if (cv2.waitKey(200) & 0xFF) in (ord("q"), ord("Q")):
             break
     cv2.destroyAllWindows()
     passed = all(ok for _, ok, _ in items)
-    return 0 if passed and not crashed and not stopped_early else 1
+    return 0 if passed and not crashed and not interrupted else 1
 
 
 if __name__ == "__main__":

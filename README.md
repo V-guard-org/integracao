@@ -246,28 +246,30 @@ Na tela da Pi (Raspberry Pi Connect), depois da calibração:
 
 ```bash
 cd ~/vguard/integracao
-.venv/bin/python tools/vision_bench.py             # passo 0: 10 min, só a visão; pasta ../dados-integracao
+.venv/bin/python tools/vision_bench.py             # passo 0: só a visão; pasta ../dados-integracao
 .venv/bin/python tools/vision_bench.py --passo-c   # passo C: com o ESP32 (/dev/ttyUSB0) e o kill -9
 ```
 
 A visão roda sem tela, como no critério. Uma janela à parte mostra em letra grande o que quem lê
 a tela deve pedir, em voz alta, a quem está na frente da câmera; quem está na câmera olha sempre
-para a frente, nunca para a tela. A sequência começa no **ESPAÇO** e dura 10 min:
+para a frente, nunca para a tela. A sequência começa no **ESPAÇO** e acaba no **N**, depois do
+último pedido (ou sozinha, nos 10 min do `--seconds`):
 
 1. `OLHE PARA A FRENTE` por 2 min, com a contagem até o próximo pedido;
 2. `PREPARE-SE` por 5 s, e então `PECA PARA BOCEJAR`, até aparecer `OK! PODE FECHAR A BOCA`
    (o evento `fadiga` chegou ao log). Depois de 20 s sem o evento, a tela pede mais; em 60 s,
    `NAO DETECTOU`, e a sequência segue;
 3. mais 2 min olhando para a frente, e `PECA PARA VIRAR O ROSTO`, do mesmo jeito (`distracao`);
-4. `OLHE PARA A FRENTE` até o fim.
+4. `PEDIDOS FEITOS`: o **N** termina a bancada, e o fim mostra os critérios.
 
-**N** adianta o passo (ou pula o pedido atual) e **Q** encerra antes. Um evento fora de um pedido
+**N** adianta o passo, pula o pedido atual ou, na última parte, termina a bancada. **Q** interrompe,
+com o fim `CONFERIR` mesmo com os critérios cumpridos. Um evento fora de um pedido
 aparece em vermelho. O log inteiro vai para o terminal e para
 `../dados-integracao/bancada-visao-<data>.log`, e o fim mostra cada critério com `OK` ou `FALHOU`.
 
 No **passo C** (`--passo-c`, ou `--esp32 [PORTA]` e `--kill-vision`), o principal lê também o ESP32,
 e depois do rosto virado vem `VISAO MORTA (KILL -9)`: a ferramenta mata a visão e espera
-`OK! A VISAO VOLTOU`. No fim, ela confere no SQLite a telemetria dos 10 min: ~1 linha por segundo,
+`OK! A VISAO VOLTOU`. No fim, ela confere no SQLite a telemetria do tempo que rodou: ~1 linha por segundo,
 cada uma com `imu` e `obd`, nenhuma lacuna acima de 1,5 s (nem no kill -9), o maior `age_ms` abaixo
 de 1 s e o `lost`/`corrupt` do ESP32 em 0. O principal roda no Python dele (`VGUARD_PYTHON`, o
 `venv-principal` ou o atual).
