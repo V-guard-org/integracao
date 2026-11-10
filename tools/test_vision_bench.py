@@ -11,8 +11,8 @@ import os
 import tempfile
 
 from vision_bench import (GREEN, KILL, ORANGE, RED, Script, ascii_text, build_steps, clock, criteria,
-                          parse_line, parse_summary, principal_python, status_lines, telemetry_report,
-                          vision_pid)
+                          ending, parse_line, parse_summary, principal_python, status_lines,
+                          telemetry_report, vision_pid)
 
 
 class ParseLineTest(unittest.TestCase):
@@ -107,7 +107,10 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(script.view(1262.0)["title"], "OK! PODE VOLTAR")
         script.tick(1266.0)
         self.assertTrue(script.last_step)
-        self.assertEqual(script.view(1300.0)["footer"], "Fim em 5:00")
+        view = script.view(1300.0)
+        self.assertEqual((view["title"], view["color"]), ("PEDIDOS FEITOS", GREEN))
+        self.assertEqual(view["detail"], "N: terminar a bancada agora.")
+        self.assertEqual(view["footer"], "Ou fim sozinho em 5:00")
         self.assertTrue(script.passed())
         self.assertEqual(script.outside, [])
 
@@ -164,13 +167,53 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual((script.index, script.phase), (2, "normal"))
         self.assertFalse(script.passed())
 
-    def test_last_step_stays(self):
+    def test_key_n_on_the_last_part_ends_the_bench(self):
         script = self.make()
-        for now in range(1001, 1020):
+        for now in range(1001, 1009):
             script.skip(float(now))
         self.assertTrue(script.last_step)
+        self.assertFalse(script.finished(1008.5))
+        script.skip(1009.0)                        # N na última parte: termina (Issue #12)
+        self.assertTrue(script.finished(1009.0))
+        self.assertTrue(script.terminated)
+        self.assertEqual(script.end, 1009.0)
+        script.skip(1010.0)                        # um N a mais não muda nada
+        self.assertEqual(script.end, 1009.0)
+
+    def test_key_n_before_the_last_part_does_not_end(self):
+        script = self.make()
+        script.skip(1001.0)
+        self.assertFalse(script.terminated)
+        self.assertFalse(script.finished(1001.0))
+        self.assertEqual(script.end, 1600.0)
+
+    def test_last_part_ends_alone_at_the_maximum(self):
+        script = self.make()
+        for now in range(1001, 1009):
+            script.skip(float(now))
         script.tick(1599.0)
         self.assertTrue(script.last_step)
+        self.assertFalse(script.finished(1599.0))
+        self.assertTrue(script.finished(1600.0))
+        self.assertFalse(script.terminated)
+
+    def test_keys_line(self):
+        script = Script(600, 120, 60)
+        self.assertEqual(script.keys_line(), "ESPACO: comecar     Q: sair")
+        script.begin(1000.0)
+        self.assertEqual(script.keys_line(), "N: adiantar     Q: interromper")
+        for now in range(1001, 1009):
+            script.skip(float(now))
+        self.assertEqual(script.keys_line(), "N: terminar     Q: interromper")
+
+    def test_ending(self):
+        script = self.make()
+        self.assertEqual(ending(script, crashed=False, interrupted=False), "fim pelo tempo")
+        self.assertEqual(ending(script, crashed=False, interrupted=True), "interrompida com o Q")
+        self.assertEqual(ending(script, crashed=True, interrupted=True), "o principal saiu antes")
+        for now in range(1001, 1010):
+            script.skip(float(now))
+        self.assertEqual(ending(script, crashed=False, interrupted=False), "terminada com o N")
 
     def test_normal_countdown_never_passes_the_end(self):
         script = self.make(total=100)
@@ -187,7 +230,8 @@ class ScriptTest(unittest.TestCase):
         for now in range(1000, 1700, 1):
             script.tick(float(now))
             view = script.view(float(now))
-            texts += [view["title"], view["detail"], view["footer"], script.step_line(float(now))]
+            texts += [view["title"], view["detail"], view["footer"], script.step_line(float(now)),
+                      script.keys_line()]
         texts.append(Script(600, 120, 60).view(0.0)["detail"])
         for text in texts:
             self.assertEqual(ascii_text(text), text)
