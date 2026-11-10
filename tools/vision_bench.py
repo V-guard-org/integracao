@@ -1,28 +1,37 @@
 """
-Bancada guiada da visão, o passo 0 (Issue #6): roda a visão sem tela por
-10 min e mostra numa janela da Pi, em letra grande, o que quem lê a tela
-deve pedir agora a quem está na frente da câmera: olhar para a frente,
-bocejar ou virar o rosto. Cada pedido espera o evento aparecer no log da
-visão e mostra OK assim que ele chega.
+Bancada guiada da visão: o passo 0 (Issue #6) e o passo C (Issue #10). Roda
+o programa principal sem tela por 10 min (vguard.py --headless, com a visão
+num processo filho) e mostra numa janela da Pi, em letra grande, o que quem
+lê a tela deve pedir agora a quem está na frente da câmera: olhar para a
+frente, bocejar ou virar o rosto. Cada pedido espera o evento aparecer no log
+e mostra OK assim que ele chega.
 
-    .venv/bin/python tools/vision_bench.py
+    .venv/bin/python tools/vision_bench.py                    # passo 0: só a visão
+    .venv/bin/python tools/vision_bench.py --passo-c          # passo C: com o ESP32 e o kill -9
     .venv/bin/python tools/vision_bench.py --seconds 120 --normal 20
 
-Roda na tela da Pi, pelo Raspberry Pi Connect. A visão continua sem tela
-(vguard.py --headless), como pede o critério; a janela só lê o log dela.
-Teclas na janela: ESPAÇO começa os 10 min, N adianta o passo (ou pula o
-pedido atual) e Q encerra antes. O log inteiro vai para o terminal e para
-<dados>/bancada-visao-<data>.log.
+No passo C (--passo-c, ou --esp32 e --kill-vision), o principal lê também o
+ESP32 (o esp32-sim na USB), a ferramenta mata a visão com kill -9 no meio e
+espera ela voltar sozinha, e no fim confere a telemetria no SQLite: ~1 linha
+por segundo com imu e obd, nenhuma lacuna acima de 1,5 s (nem no kill -9), o
+maior age_ms abaixo de 1 s e o lost/corrupt do ESP32 em 0.
 
-Sai com o código 1 se a visão saiu sozinha, se a bancada foi encerrada
-antes ou se algum pedido não gerou o evento.
+O principal roda no Python dele (VGUARD_PYTHON, o venv-principal ou o atual) e
+a visão no dela (VGUARD_VISION_PYTHON). Roda na tela da Pi, pelo Raspberry Pi
+Connect; a janela só lê o log. Teclas: ESPAÇO começa os 10 min, N adianta o
+passo (ou pula o pedido atual) e Q encerra antes. O log inteiro vai para o
+terminal e para <dados>/bancada-visao-<data>.log.
+
+Sai com o código 1 se algum critério não passou.
 """
 
 import argparse
+import json
 import os
 import queue
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -32,7 +41,7 @@ import unicodedata
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
-NORMAL, ACTION = "normal", "action"
+NORMAL, ACTION, KILL = "normal", "action", "kill"
 
 # Os textos são lidos em voz alta por quem está na tela. Só ASCII: a fonte do
 # OpenCV não tem acento.
@@ -51,6 +60,25 @@ STEPS = (
      "ok": "OK! PODE VOLTAR"},
     {"kind": NORMAL},
 )
+# Passo C: a ferramenta mata a visão (kill -9) e espera ela voltar sozinha.
+KILL_STEP = {"kind": KILL, "event": "volta", "label": "Visao de volta", "verb": "matar a visao",
+             "next": "matar a visao (kill -9)",
+             "prep": "Daqui a %d s: a visao vai ser morta (kill -9).",
+             "ask": "VISAO MORTA (KILL -9)",
+             "how": "Na camera: continuar olhando para a frente.",
+             "hint": "Ainda nao voltou: confira o log no terminal.",
+             "waiting": "Esperando a visao voltar sozinha...",
+             "ok": "OK! A VISAO VOLTOU",
+             "done": "A visao voltou sozinha."}
+
+
+def build_steps(kill=False):
+    """Os passos da bancada: no passo C, o kill -9 depois do rosto virado."""
+    steps = list(STEPS[:-1])
+    if kill:
+        steps += [{"kind": NORMAL}, KILL_STEP]
+    return tuple(steps + [{"kind": NORMAL}])
+
 
 GREEN, ORANGE, RED, WHITE = "green", "orange", "red", "white"
 
@@ -67,7 +95,8 @@ class Script:
     """
 
     def __init__(self, total_s, normal_s, ask_timeout_s, prep_s=5.0, result_s=4.0,
-                 hint_after_s=20.0, steps=STEPS):
+                 hint_after_s=20.0, steps=STEPS, name="passo 0"):
+        self.name = name
         self.total_s = total_s
         self.normal_s = normal_s
         self.ask_timeout_s = ask_timeout_s
@@ -97,7 +126,7 @@ class Script:
         return self.start is not None
 
     def expected(self):
-        return [step["event"] for step in self.steps if step["kind"] == ACTION]
+        return [step["event"] for step in self.steps if step["kind"] in (ACTION, KILL)]
 
     def label(self, event):
         for step in self.steps:
@@ -174,23 +203,23 @@ class Script:
                 return {"title": "OLHE PARA A FRENTE", "color": GREEN,
                         "detail": "Ultima parte: nada mais a pedir.",
                         "footer": "Fim em %s" % clock(max(0.0, self.end - now))}
-            next_verb = self.steps[self.index + 1]["verb"]
+            following = self.steps[self.index + 1]
             left = min(self.normal_s - elapsed, self.end - now)
             return {"title": "OLHE PARA A FRENTE", "color": GREEN,
                     "detail": "Nada a pedir agora.",
-                    "footer": "Em %s: pedir para %s" % (clock(max(0.0, left)), next_verb)}
+                    "footer": "Em %s: %s" % (clock(max(0.0, left)),
+                                             following.get("next", "pedir para " + following["verb"]))}
         if self.phase == "prep":
             left = max(1, int(self.prep_s - elapsed + 0.999))
-            return {"title": "PREPARE-SE", "color": ORANGE,
-                    "detail": "Daqui a %d s: pedir para %s." % (left, step["verb"]),
-                    "footer": ""}
+            text = step.get("prep", "Daqui a %d s: pedir para " + step["verb"] + ".")
+            return {"title": "PREPARE-SE", "color": ORANGE, "detail": text % left, "footer": ""}
         if self.phase == "ask":
             detail = step["hint"] if elapsed >= self.hint_after_s else step["how"]
             return {"title": step["ask"], "color": ORANGE, "detail": detail,
-                    "footer": "Esperando a deteccao..."}
+                    "footer": step.get("waiting", "Esperando a deteccao...")}
         if self.results.get(step["event"]) == "OK":
             return {"title": step["ok"], "color": GREEN,
-                    "detail": "%s detectado e gravado." % step["label"],
+                    "detail": step.get("done", "%s detectado e gravado." % step["label"]),
                     "footer": "Volte a olhar para a frente."}
         return {"title": "NAO DETECTOU", "color": RED,
                 "detail": "%s: %s. Seguindo para o proximo passo." % (
@@ -200,7 +229,7 @@ class Script:
     def step_line(self, now):
         """A linha de cima: o passo e o tempo."""
         if not self.started:
-            return "Bancada da visao (passo 0): 10 min sem tela"
+            return "Bancada da visao (%s): %s sem tela" % (self.name, clock(self.total_s))
         return "Passo %d de %d     %s / %s" % (
             self.index + 1, len(self.steps), clock(min(now, self.end) - self.start), clock(self.total_s))
 
@@ -215,6 +244,8 @@ _EVENT = re.compile(r"\[EVENTO REGISTRADO\] ID=\S+ Tipo='(\w+)'")   # UUID hoje,
 _FPS = re.compile(r"visão: ([\d.]+) FPS")
 _PI = re.compile(r"Pi: ([\d.]+) °C, throttled (0x[0-9a-fA-F]+)")
 _SUMMARY = re.compile(r"resumo: (.*)")
+_BACK = re.compile(r"visão de volta")
+_FELL = re.compile(r"visão caiu \(código (-?\d+)\)")
 _PROBLEM = re.compile(r" (WARNING|ERROR) |^\w*Error: |^Traceback")
 
 
@@ -232,6 +263,11 @@ def parse_line(line):
     match = _SUMMARY.search(line)
     if match:
         return "summary", match.group(1).strip()
+    if _BACK.search(line):
+        return "back", None
+    match = _FELL.search(line)
+    if match:
+        return "fell", int(match.group(1))
     if _PROBLEM.search(line):
         return "problem", line.strip()
     return None
@@ -256,7 +292,117 @@ def status_lines(script, status):
         "carregando..." if status["fps"] is None else "%.1f FPS" % status["fps"],
         "-" if status["temp"] is None else "%.1f C" % status["temp"],
         status["throttled"] or "-")
+    if status.get("falls"):
+        vision += "   visao caiu %dx" % status["falls"]
     return ["   ".join(results), "Eventos fora do pedido: %s" % outside, vision]
+
+
+# ---------------------------------------------------------------- critérios
+
+def principal_python(environ=os.environ):
+    """O Python do programa principal: VGUARD_PYTHON, o venv-principal ou o atual."""
+    chosen = environ.get("VGUARD_PYTHON")
+    if chosen:
+        return chosen
+    venv = os.path.join(os.path.dirname(REPO), "venv-principal", "bin", "python")
+    return venv if os.path.exists(venv) else sys.executable
+
+
+def vision_pid(principal_pid, proc="/proc"):
+    """O pid da visão: o filho do principal que roda o vision/main.py (Linux, pelo /proc)."""
+    try:
+        tasks = os.listdir(os.path.join(proc, str(principal_pid), "task"))
+    except OSError:
+        return None
+    for task in tasks:      # o filho pertence à thread que o iniciou
+        try:
+            with open(os.path.join(proc, str(principal_pid), "task", task, "children")) as stream:
+                children = stream.read().split()
+        except OSError:
+            continue
+        for pid in children:
+            try:
+                with open(os.path.join(proc, pid, "cmdline"), "rb") as stream:
+                    command = stream.read().split(b"\0")
+            except OSError:
+                continue
+            if any(part.endswith(b"vision/main.py") for part in command):
+                return int(pid)
+    return None
+
+
+def parse_summary(text):
+    """O resumo do principal em números (None no que não apareceu)."""
+    def number(pattern, kind=float):
+        match = re.search(pattern, text or "")
+        return kind(match.group(1)) if match else None
+    return {
+        "fps": number(r"visão ([\d.]+) FPS em média"),
+        "restarts": number(r"visão reiniciada (\d+)", int),
+        "lost": number(r"ESP32: lost (\d+)", int),
+        "corrupt": number(r"ESP32: lost \d+, corrupt (\d+)", int),
+        "temp_max": number(r"Pi até ([\d.]+) °C"),
+        "throttled_ok": "throttled sem avisos" in (text or ""),
+    }
+
+
+def read_telemetry(data_dir):
+    """As linhas de telemetria do SQLite da bancada: [(ts, dados)]."""
+    path = os.path.join(data_dir, "vguard.db")
+    if not os.path.exists(path):
+        return []
+    db = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        return [(ts, json.loads(data)) for ts, data in db.execute("SELECT ts, data FROM telemetry ORDER BY ts")]
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+
+
+def telemetry_report(rows, start, end, kill_at=None):
+    """A telemetria entre start e end (time.time()): linhas, com imu e obd, lacunas e age_ms."""
+    inside = [(ts, data) for ts, data in rows if start <= ts <= end]
+    gaps = [(b - a, a) for (a, _), (b, _) in zip(inside, inside[1:])]
+    near_kill = [gap for gap, at in gaps if kill_at is not None and kill_at - 5 <= at <= kill_at + 30]
+    ages = [age for _, data in inside for age in data.get("obd", {}).get("age_ms", {}).values()]
+    return {
+        "rows": len(inside),
+        "both": sum(1 for _, data in inside if {"imu", "obd"} <= set(data)),
+        "max_gap": max((gap for gap, _ in gaps), default=None),
+        "kill_gap": max(near_kill, default=None),
+        "max_age_ms": max(ages, default=None),
+    }
+
+
+def criteria(summary, telemetry, script, seconds, esp32=False, kill=False):
+    """Os critérios da bancada: [(nome, passou, valor)]."""
+    def fmt(value, pattern):
+        return "-" if value is None else pattern % value
+    items = [("Visao com 12 FPS ou mais", summary["fps"] is not None and summary["fps"] >= 12,
+              fmt(summary["fps"], "%.1f FPS"))]
+    for name in script.expected():
+        items.append((script.label(name), script.results.get(name) == "OK", script.results.get(name, "nao pedido")))
+    items.append(("Temperatura abaixo de 75 C", summary["temp_max"] is not None and summary["temp_max"] < 75,
+                  fmt(summary["temp_max"], "%.1f C")))
+    items.append(("Nenhum aviso do throttled", summary["throttled_ok"],
+                  "sem avisos" if summary["throttled_ok"] else "com avisos"))
+    if esp32:
+        items.append(("ESP32 sem perdas", summary["lost"] == 0 and summary["corrupt"] == 0,
+                      "lost %s, corrupt %s" % (summary["lost"], summary["corrupt"])))
+        enough = telemetry["rows"] >= 0.95 * seconds and telemetry["both"] >= telemetry["rows"] - 1
+        items.append(("Telemetria 1/s com imu e obd", enough,
+                      "%d linhas, %d com imu e obd" % (telemetry["rows"], telemetry["both"])))
+        items.append(("Nenhuma lacuna acima de 1,5 s",
+                      telemetry["max_gap"] is not None and telemetry["max_gap"] <= 1.5,
+                      fmt(telemetry["max_gap"], "maior %.2f s")))
+        items.append(("age_ms abaixo de 1 s", telemetry["max_age_ms"] is not None and telemetry["max_age_ms"] < 1000,
+                      fmt(telemetry["max_age_ms"], "maior %d ms")))
+        if kill:
+            items.append(("Telemetria inteira no kill -9",
+                          telemetry["kill_gap"] is not None and telemetry["kill_gap"] <= 1.5,
+                          fmt(telemetry["kill_gap"], "maior lacuna %.2f s")))
+    return items
 
 
 # ---------------------------------------------------------------- janela (OpenCV)
@@ -306,23 +452,24 @@ def draw(cv2, np, script, status, now):
     return img
 
 
-def draw_final(cv2, np, script, status, crashed, stopped_early):
+def draw_final(cv2, np, items, status, crashed, stopped_early):
     img = np.full((HEIGHT, WIDTH, 3), BACKGROUND, np.uint8)
-    ok = script.passed() and not crashed and not stopped_early
-    _put(cv2, img, "FIM: PASSOU" if ok else "FIM: CONFERIR", 120, 2.0, BGR[GREEN if ok else RED], 5)
-    lines = []
+    ok = all(passed for _, passed, _ in items) and not crashed and not stopped_early
+    _put(cv2, img, "FIM: PASSOU" if ok else "FIM: CONFERIR", 90, 1.8, BGR[GREEN if ok else RED], 5)
+    y = 150
     if crashed:
-        lines.append("A visao saiu sozinha antes do fim.")
+        _put(cv2, img, "O programa principal saiu antes do fim.", y, 0.6, BGR[RED], 1, x=20)
+        y += 28
     if stopped_early:
-        lines.append("Bancada encerrada antes do fim (Q).")
-    lines += status_lines(script, status)
+        _put(cv2, img, "Bancada encerrada antes do fim (Q).", y, 0.6, BGR[RED], 1, x=20)
+        y += 28
+    for name, passed, value in items:
+        _put(cv2, img, "%-6s %s: %s" % ("OK" if passed else "FALHOU", name, value), y, 0.6,
+             BGR[GREEN if passed else RED], 1, x=20)
+        y += 28
     if status["summary"]:
-        lines.append("Resumo: " + status["summary"])
-    lines.append("Avise o Claude. Q: fechar a janela")
-    y = 200
-    for line in lines:
-        _put(cv2, img, line, y, 0.65, BGR[WHITE], 1, x=20)
-        y += 40
+        _put(cv2, img, "Resumo: " + status["summary"], y + 8, 0.45, GRAY, 1, x=20)
+    _put(cv2, img, "Avise o Claude. Q: fechar a janela", HEIGHT - 16, 0.6, BGR[WHITE], 1, x=20)
     return img
 
 
@@ -361,6 +508,11 @@ def _drain(lines, script, status):
             status["temp"], status["throttled"] = value
         elif kind == "summary":
             status["summary"] = value
+        elif kind == "back":
+            if script.step["kind"] == KILL:
+                script.event("volta", time.monotonic())
+        elif kind == "fell":
+            status["falls"] += 1
         else:
             status["problem"] = value
 
@@ -377,7 +529,15 @@ def parse_args(argv=None):
                         help="segundos olhando para a frente antes de cada pedido (padrão: %(default)s)")
     parser.add_argument("--ask-timeout", type=float, default=60,
                         help="segundos de espera do evento em cada pedido (padrão: %(default)s)")
+    parser.add_argument("--esp32", nargs="?", const="/dev/ttyUSB0", metavar="PORTA",
+                        help="lê também o ESP32 (padrão da porta: /dev/ttyUSB0) e confere a telemetria")
+    parser.add_argument("--kill-vision", action="store_true",
+                        help="mata a visão com kill -9 no meio e espera ela voltar sozinha")
+    parser.add_argument("--passo-c", action="store_true", help="o passo C: --esp32 e --kill-vision")
     args = parser.parse_args(argv)
+    if args.passo_c:
+        args.esp32 = args.esp32 or "/dev/ttyUSB0"
+        args.kill_vision = True
     args.data = os.path.abspath(args.data)
     if args.calibration_file is None:
         args.calibration_file = os.path.join(args.data, "calibration-driver.json")
@@ -395,10 +555,13 @@ def main(argv=None):
 
     os.makedirs(args.data, exist_ok=True)
     log_path = os.path.join(args.data, time.strftime("bancada-visao-%Y%m%d-%H%M%S.log"))
-    command = [sys.executable, "-u", "-B", os.path.join(REPO, "vguard.py"), "--headless",
-               "--source", args.source, "--no-esp32", "--no-gps", "--no-sync",
-               "--calibration-file", args.calibration_file]
+    command = [principal_python(), "-u", "-B", os.path.join(REPO, "vguard.py"), "--headless",
+               "--source", args.source, "--no-gps", "--no-sync", "--calibration-file", args.calibration_file]
     env = dict(os.environ, VGUARD_DATA=args.data, PYTHONIOENCODING="utf-8")
+    if args.esp32:
+        env["VGUARD_ESP32"] = args.esp32
+    else:
+        command.append("--no-esp32")
     child = subprocess.Popen(command, cwd=REPO, env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                              errors="replace", bufsize=1)
@@ -406,8 +569,11 @@ def main(argv=None):
     reader = threading.Thread(target=_pump, args=(child.stdout, lines, log_path), daemon=True)
     reader.start()
 
-    script = Script(args.seconds, args.normal, args.ask_timeout)
-    status = {"fps": None, "temp": None, "throttled": None, "problem": None, "summary": None}
+    name = "passo C" if args.esp32 and args.kill_vision else "passo 0"
+    script = Script(args.seconds, args.normal, args.ask_timeout, steps=build_steps(args.kill_vision), name=name)
+    status = {"fps": None, "temp": None, "throttled": None, "problem": None, "summary": None, "falls": 0}
+    started_wall = ended_wall = killed_wall = None
+    killed_step = None
     window = "V-GUARD - bancada da visao"
     # Tamanho fixo e sem a barra do OpenCV: na 1ª rodada a janela ficou toda preta,
     # provavelmente pelo zoom da roda do mouse ou pelas setas da barra.
@@ -432,16 +598,27 @@ def main(argv=None):
             if script.finished(now):
                 break
             script.tick(now)
+            if script.step["kind"] == KILL and script.phase == "ask" and killed_step != script.index:
+                killed_step = script.index
+                pid = vision_pid(child.pid)
+                if pid is None:
+                    status["problem"] = "kill -9: a visao nao estava rodando"
+                else:
+                    os.kill(pid, signal.SIGKILL)
+                    killed_wall = time.time()
+                    print("\n[bancada] kill -9 na visão (pid %d)\n" % pid, flush=True)
             show(draw(cv2, np, script, status, now))
             key = cv2.waitKey(200) & 0xFF
-            if key == ord(" "):
+            if key == ord(" ") and not script.started:
                 script.begin(time.monotonic())
+                started_wall = time.time()
             elif key in (ord("n"), ord("N")) and script.started:
                 script.skip(time.monotonic())
             elif key in (ord("q"), ord("Q")):
                 stopped_early = True
                 break
     finally:
+        ended_wall = time.time()
         if child.poll() is None:
             child.send_signal(signal.SIGTERM)
             try:
@@ -452,23 +629,27 @@ def main(argv=None):
         reader.join(timeout=5)
     _drain(lines, script, status)
 
-    results = ", ".join("%s %s" % (name, script.results.get(name, "nao pedido")) for name in script.expected())
     outside = ", ".join(event for event, _ in script.outside) or "nenhum"
     measured = 0.0 if not script.started else min(time.monotonic(), script.end) - script.start
-    print("\nBancada da visão: %s de %s (visão rodando por %s)" % (
-        clock(measured), clock(args.seconds), clock(time.monotonic() - launched)))
-    print("A visão saiu sozinha: %s (código %s)" % ("sim" if crashed else "não", child.returncode))
-    print("Pedidos: %s" % results)
+    telemetry = telemetry_report(read_telemetry(args.data), started_wall or ended_wall, ended_wall, killed_wall)
+    items = criteria(parse_summary(status["summary"]), telemetry, script, measured,
+                     esp32=bool(args.esp32), kill=args.kill_vision)
+    print("\nBancada da visão (%s): %s de %s (principal rodando por %s)" % (
+        script.name, clock(measured), clock(args.seconds), clock(time.monotonic() - launched)))
+    print("O principal saiu antes do fim: %s (código %s)" % ("sim" if crashed else "não", child.returncode))
+    for name, passed, value in items:
+        print("  %-6s %s: %s" % ("OK" if passed else "FALHOU", name, value))
     print("Eventos fora do pedido: %s" % outside)
-    print("Resumo da visão: %s" % (status["summary"] or "não chegou"))
+    print("Resumo: %s" % (status["summary"] or "não chegou"))
     print("Log: %s" % log_path)
 
-    show(draw_final(cv2, np, script, status, crashed, stopped_early))
+    show(draw_final(cv2, np, items, status, crashed, stopped_early))
     while cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) >= 1:
         if (cv2.waitKey(200) & 0xFF) in (ord("q"), ord("Q")):
             break
     cv2.destroyAllWindows()
-    return 0 if script.passed() and not crashed and not stopped_early else 1
+    passed = all(ok for _, ok, _ in items)
+    return 0 if passed and not crashed and not stopped_early else 1
 
 
 if __name__ == "__main__":

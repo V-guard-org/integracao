@@ -18,9 +18,9 @@ import numpy as np
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "models" / "face_landmarker.task"
 
-# Resolução padrão de captura e inferência (equilíbrio ideal para Raspberry Pi 4)
-FRAME_WIDTH: int = 640
-FRAME_HEIGHT: int = 480
+# Resolução padrão de captura e inferência (equilíbrio ideal para Raspberry Pi 4).
+# Fica em options.py, que o programa principal importa sem o NumPy (Issue #10).
+from options import FRAME_HEIGHT, FRAME_WIDTH  # noqa: E402
 
 # Parâmetros do MediaPipe Face Landmarker
 MIN_FACE_DETECTION_CONFIDENCE: float = 0.5
