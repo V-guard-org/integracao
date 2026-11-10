@@ -9,6 +9,7 @@ sem ele, ela acaba sozinha nos 10 min.
 
     .venv/bin/python tools/vision_bench.py                    # passo 0: só a visão
     .venv/bin/python tools/vision_bench.py --passo-c          # passo C: com o ESP32 e o kill -9
+    .venv/bin/python tools/vision_bench.py --passo-c --server # e os eventos ao servidor falso (Issue #16)
     .venv/bin/python tools/vision_bench.py --seconds 120 --normal 20
 
 No passo C (--passo-c, ou --esp32 e --kill-vision), o principal lê também o
@@ -360,6 +361,8 @@ def parse_summary(text):
         "corrupt": number(r"ESP32: lost \d+, corrupt (\d+)", int),
         "temp_max": number(r"Pi até ([\d.]+) °C"),
         "throttled_ok": "throttled sem avisos" in (text or ""),
+        "sent": number(r"envio: (\d+) eventos? enviados?", int),
+        "unsent": number(r"envio: \d+ eventos? enviados?, (\d+) pendentes?", int),
     }
 
 
@@ -403,7 +406,7 @@ def ending(script, crashed, interrupted):
     return "fim pelo tempo"
 
 
-def criteria(summary, telemetry, script, seconds, esp32=False, kill=False):
+def criteria(summary, telemetry, script, seconds, esp32=False, kill=False, server=False):
     """Os critérios da bancada: [(nome, passou, valor)]."""
     def fmt(value, pattern):
         return "-" if value is None else pattern % value
@@ -430,6 +433,11 @@ def criteria(summary, telemetry, script, seconds, esp32=False, kill=False):
             items.append(("Telemetria inteira no kill -9",
                           telemetry["kill_gap"] is not None and telemetry["kill_gap"] <= 1.5,
                           fmt(telemetry["kill_gap"], "maior lacuna %.2f s")))
+    if server:
+        # Com o --server, os eventos vão ao servidor (Issue #16): nenhum pode ficar no cartão.
+        items.append(("Eventos enviados ao servidor", summary["sent"] is not None and summary["unsent"] == 0,
+                      "-" if summary["sent"] is None else "%d enviados, %d pendentes" % (
+                          summary["sent"], summary["unsent"])))
     return items
 
 
@@ -562,6 +570,9 @@ def parse_args(argv=None):
     parser.add_argument("--kill-vision", action="store_true",
                         help="mata a visão com kill -9 no meio e espera ela voltar sozinha")
     parser.add_argument("--passo-c", action="store_true", help="o passo C: --esp32 e --kill-vision")
+    parser.add_argument("--server", nargs="?", const="http://127.0.0.1:8000/api", metavar="URL",
+                        help="manda os eventos a este servidor (padrão: o falso, events/fake_server.py, em "
+                             "http://127.0.0.1:8000/api) e confere no fim que nenhum ficou pendente")
     args = parser.parse_args(argv)
     if args.passo_c:
         args.esp32 = args.esp32 or "/dev/ttyUSB0"
@@ -584,8 +595,14 @@ def main(argv=None):
     os.makedirs(args.data, exist_ok=True)
     log_path = os.path.join(args.data, time.strftime("bancada-visao-%Y%m%d-%H%M%S.log"))
     command = [principal_python(), "-u", "-B", os.path.join(REPO, "vguard.py"), "--headless",
-               "--source", args.source, "--no-gps", "--no-sync", "--calibration-file", args.calibration_file]
+               "--source", args.source, "--no-gps", "--calibration-file", args.calibration_file]
     env = dict(os.environ, VGUARD_DATA=args.data, PYTHONIOENCODING="utf-8")
+    if args.server:
+        # O envio dos eventos (e o Sync antigo) para o servidor pedido.
+        env["VGUARD_BACKEND"] = args.server
+        env.setdefault("VGUARD_TOKEN", "bancada")
+    else:
+        command.append("--no-sync")
     if args.esp32:
         env["VGUARD_ESP32"] = args.esp32
     else:
@@ -661,7 +678,7 @@ def main(argv=None):
     measured = 0.0 if not script.started else min(time.monotonic(), script.end) - script.start
     telemetry = telemetry_report(read_telemetry(args.data), started_wall or ended_wall, ended_wall, killed_wall)
     items = criteria(parse_summary(status["summary"]), telemetry, script, measured,
-                     esp32=bool(args.esp32), kill=args.kill_vision)
+                     esp32=bool(args.esp32), kill=args.kill_vision, server=bool(args.server))
     print("\nBancada da visão (%s): %s, %s (máximo %s; principal rodando por %s)" % (
         script.name, clock(measured), ending(script, crashed, interrupted), clock(args.seconds),
         clock(time.monotonic() - launched)))

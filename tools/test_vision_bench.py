@@ -279,8 +279,12 @@ class PassoCTest(unittest.TestCase):
         summary = parse_summary("visão 14.3 FPS em média; eventos: fadiga 1, distracao 1; visão reiniciada 1 vez; "
                                 "ESP32: lost 0, corrupt 2; Pi até 62.8 °C, throttled sem avisos")
         self.assertEqual(summary, {"fps": 14.3, "restarts": 1, "lost": 0, "corrupt": 2,
-                                   "temp_max": 62.8, "throttled_ok": True})
+                                   "temp_max": 62.8, "throttled_ok": True, "sent": None, "unsent": None})
         self.assertEqual(parse_summary(None)["fps"], None)
+        sent = parse_summary("visão 13.5 FPS em média; envio: 1 evento enviado, 0 pendentes; Pi até 50.0 °C")
+        self.assertEqual((sent["sent"], sent["unsent"]), (1, 0))
+        sent = parse_summary("envio: 5 eventos enviados, 2 pendentes")
+        self.assertEqual((sent["sent"], sent["unsent"]), (5, 2))
 
     def test_telemetry_report(self):
         rows = [(100.0 + i, {"imu": {}, "obd": {"age_ms": {"rpm": 200 + i}}}) for i in range(10)]
@@ -308,6 +312,17 @@ class PassoCTest(unittest.TestCase):
                   if not passed]
         self.assertEqual(failed, ["ESP32 sem perdas", "Telemetria inteira no kill -9"])
         self.assertEqual(len(criteria(summary, telemetry, Script(600, 120, 60), 600)), 5)
+
+    def test_server_criterion(self):
+        script = Script(600, 120, 60)
+        script.results = {"fadiga": "OK", "distracao": "OK"}
+        text = "visão 14.3 FPS em média; envio: %s; Pi até 50.0 °C, throttled sem avisos"
+        for sending, passed in (("2 eventos enviados, 0 pendentes", True), ("1 evento enviado, 1 pendente", False)):
+            with self.subTest(sending=sending):
+                items = criteria(parse_summary(text % sending), None, script, 120, server=True)
+                self.assertEqual(items[-1][:2], ("Eventos enviados ao servidor", passed))
+        items = criteria(parse_summary("visão 14.3 FPS em média"), None, script, 120, server=True)
+        self.assertEqual(items[-1], ("Eventos enviados ao servidor", False, "-"))
 
     def test_principal_python(self):
         self.assertEqual(principal_python({"VGUARD_PYTHON": "/opt/py"}), "/opt/py")
