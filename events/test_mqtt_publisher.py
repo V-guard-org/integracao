@@ -179,13 +179,13 @@ class PublisherTest(BrokerTest):
             self.assertEqual(publisher.not_published, 3)
             self.assertEqual(self.manager.pending_counts()["telemetry"], 3)    # ficam no cartão
 
+            health_before = publisher.health_sent
             self.broker.start()             # voltou, na mesma porta
             self.assertTrue(wait_for(lambda: publisher.connected, 5), "não voltou sozinho")
-            self.listener.close()
-            self.listener = Listener(self.port)
+            self.assertTrue(wait_for(lambda: publisher.health_sent > health_before, 3),
+                            "sem a saúde depois de conectar")
             self.rows(1006, 1008)
             self.assertTrue(wait_for(lambda: publisher.published == 5, 3))
-            self.assertTrue(wait_for(lambda: self.listener.topic("saude"), 3), "sem a saúde depois de conectar")
         text = "\n".join(logs.output)
         self.assertIn("MQTT caiu", text)
         self.assertIn("MQTT de volta depois de", text)
