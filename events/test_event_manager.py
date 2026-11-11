@@ -79,18 +79,71 @@ class Folder(unittest.TestCase):
 
 class TelemetryTest(Folder):
 
-    def test_one_line_per_second(self):
+    def test_one_line_per_full_second(self):
         manager = self.open()
-        for i in range(300):            # 10 Hz por 30 s
-            ts = 1000.0 + i / 10
+        seen = []
+        manager.on_telemetry = seen.append
+        for i in range(300):            # 10 Hz por 30 s, começando no meio de um segundo
+            ts = 1000.55 + i / 10
             manager.update("imu", {"ax": i}, ts)
             manager.update("gps", {"lat": -25.4, "lon": -49.2}, ts)
         rows = manager.pending_telemetry()
-        self.assertEqual(len(rows), 30)
-        self.assertEqual(rows[1]["data"]["imu"], {"ts": 1001.0, "ax": 10})
+        # Do segundo 1000 ao 1029; o 1030 ainda está em montagem.
+        self.assertEqual([row["ts"] for row in rows], [1000.0 + n for n in range(30)])
+        # A última leitura de [1001, 1002): a de 1001.95 (i = 14).
+        self.assertEqual(rows[1]["data"]["imu"], {"ts": 1000.55 + 14 / 10, "ax": 14})
         self.assertEqual(set(rows[1]["data"]), {"imu", "gps"})
+        self.assertEqual(seen, rows)            # um aviso por linha, depois de gravada
         manager.ack_telemetry([row["id"] for row in rows])
         self.assertEqual(manager.pending_counts(), {"telemetry": 0, "events": 0})
+
+    def test_only_sensors_read_in_that_second(self):
+        manager = self.open()
+        manager.update("gps", {"lat": -25.4}, 1000.2)
+        manager.update("imu", {"ax": 1}, 1001.3)
+        manager.update("imu", {}, 1001.6)       # sensor sem dado: só o horário
+        manager.update("imu", {"ax": 2}, 1003.1)    # o 1002 ficou vazio: sem linha
+        manager.update("imu", {"ax": 3}, 1004.0)
+        rows = manager.pending_telemetry()
+        self.assertEqual([(row["ts"], row["data"]) for row in rows], [
+            (1000.0, {"gps": {"ts": 1000.2, "lat": -25.4}}),
+            (1001.0, {"imu": {"ts": 1001.6}}),
+            (1003.0, {"imu": {"ts": 1003.1, "ax": 2}}),
+        ])
+
+    def test_late_reading_of_a_closed_second_only_goes_to_the_snapshot(self):
+        manager = self.open()
+        manager.update("imu", {"ax": 1}, 1001.1)
+        manager.update("gps", {"lat": -25.4}, 1002.0)
+        manager.update("obd", {"rpm": 800.0}, 1001.9)   # chegou depois do 1002
+        manager.update("imu", {"ax": 2}, 1003.0)
+        self.assertEqual([row["data"] for row in manager.pending_telemetry()],
+                         [{"imu": {"ts": 1001.1, "ax": 1}}, {"gps": {"ts": 1002.0, "lat": -25.4}}])
+        manager.record_event("fadiga", 0.9, JPEG, 1003.0)
+        self.assertIn("obd", manager.pending_events()[0]["telemetria"])
+
+    def test_close_writes_the_second_being_assembled(self):
+        manager = self.open()
+        manager.update("imu", {"ax": 1}, 1000.5)
+        manager.close()
+        manager = self.open()
+        self.assertEqual([row["ts"] for row in manager.pending_telemetry()], [1000.0])
+
+    def test_window_by_ts(self):
+        manager = self.open()
+        for second in range(1000, 1031):
+            manager.update("imu", {"ax": second}, second + 0.5)
+        window = manager.telemetry_window(1005.0, 1015.0)
+        self.assertEqual([row["ts"] for row in window], [1005.0 + n for n in range(11)])
+        self.assertEqual(window[0]["data"], {"imu": {"ts": 1005.5, "ax": 1005}})
+
+    def test_a_failing_notice_does_not_stop_the_recording(self):
+        manager = self.open()
+        manager.on_telemetry = lambda row: 1 / 0
+        with self.assertLogs("events", "ERROR"):
+            manager.update("imu", {"ax": 1}, 1000.0)
+            manager.update("imu", {"ax": 2}, 1001.0)
+        self.assertEqual(len(manager.pending_telemetry()), 1)
 
 
 class EventTest(Folder):
@@ -108,7 +161,7 @@ class EventTest(Folder):
         self.assertEqual(os.path.basename(event["photo"]), "1000437-fadiga.jpg")
         with open(event["photo"], "rb") as f:
             self.assertEqual(f.read(), JPEG)
-        self.assertEqual(manager.pending_counts(), {"telemetry": 1, "events": 1})
+        self.assertEqual(manager.pending_counts(), {"telemetry": 0, "events": 1})   # a linha do 1000 ainda em montagem
 
     def test_cooldown_of_5_s_per_type(self):
         manager = self.open()
@@ -180,7 +233,8 @@ class QueueTest(Folder):
         reopened = self.open()                  # sem close: como se a energia caísse
         self.assertEqual([e["id"] for e in reopened.pending_events()], ids)
         self.assertEqual(sorted(os.listdir(reopened.photo_dir)), ["1000000-fadiga.jpg", "1000500-distracao.jpg"])
-        self.assertEqual(reopened.pending_counts(), {"telemetry": 1, "events": 2})
+        # A linha do segundo em montagem se perde no corte, como deve.
+        self.assertEqual(reopened.pending_counts(), {"telemetry": 0, "events": 2})
 
     def test_cleanup_only_at_the_warning_and_only_what_was_confirmed(self):
         manager = self.open()

@@ -9,7 +9,7 @@ sem ele, ela acaba sozinha nos 10 min.
 
     .venv/bin/python tools/vision_bench.py                    # passo 0: só a visão
     .venv/bin/python tools/vision_bench.py --passo-c          # passo C: com o ESP32 e o kill -9
-    .venv/bin/python tools/vision_bench.py --passo-c --server # e os eventos ao servidor falso (Issue #16)
+    .venv/bin/python tools/vision_bench.py --passo-c --server # e o envio ao servidor falso (Issue #18)
     .venv/bin/python tools/vision_bench.py --seconds 120 --normal 20
 
 No passo C (--passo-c, ou --esp32 e --kill-vision), o principal lê também o
@@ -24,6 +24,16 @@ Connect; a janela só lê o log. Teclas: ESPAÇO começa; N adianta o passo, pul
 o pedido atual ou, depois do último pedido, termina a bancada; Q interrompe,
 com o fim "CONFERIR". O log inteiro vai para o terminal e para
 <dados>/bancada-visao-<data>.log.
+
+Com o --server (Issue #18), o principal publica no MQTT e manda as fotos ao
+servidor. Para o servidor falso, antes, num terminal da Pi:
+
+    /usr/sbin/mosquitto -p 1883 &
+    venv-principal/bin/python events/fake_server.py --mqtt 127.0.0.1:1883
+
+No fim, a bancada espera a janela do último evento fechar (o evento só sai 12 s
+depois) antes de parar o principal, e confere que nenhum evento ficou pendente
+e que nenhuma linha de telemetria deixou de ser publicada.
 
 Sai com o código 1 se algum critério não passou.
 """
@@ -258,6 +268,10 @@ class Script:
         return None
 
 
+# Com o --server, quanto esperar depois do último evento antes de parar o
+# principal: a janela (12 s), o PUBACK, os 2 s até o PUT e a foto.
+CLOSE_WINDOW_S = 20.0
+
 _EVENT = re.compile(r"\[EVENTO REGISTRADO\] ID=\S+ Tipo='(\w+)'")   # UUID hoje, inteiro no ticket 2
 _FPS = re.compile(r"visão: ([\d.]+) FPS")
 _PI = re.compile(r"Pi: ([\d.]+) °C, throttled (0x[0-9a-fA-F]+)")
@@ -361,6 +375,8 @@ def parse_summary(text):
         "corrupt": number(r"ESP32: lost \d+, corrupt (\d+)", int),
         "temp_max": number(r"Pi até ([\d.]+) °C"),
         "throttled_ok": "throttled sem avisos" in (text or ""),
+        "published": number(r"mqtt: (\d+) linhas? publicadas?", int),
+        "unpublished": number(r"mqtt: \d+ linhas? publicadas?, (\d+) não publicadas?", int),
         "sent": number(r"envio: (\d+) eventos? enviados?", int),
         "unsent": number(r"envio: \d+ eventos? enviados?, (\d+) pendentes?", int),
     }
@@ -434,7 +450,11 @@ def criteria(summary, telemetry, script, seconds, esp32=False, kill=False, serve
                           telemetry["kill_gap"] is not None and telemetry["kill_gap"] <= 1.5,
                           fmt(telemetry["kill_gap"], "maior lacuna %.2f s")))
     if server:
-        # Com o --server, os eventos vão ao servidor (Issue #16): nenhum pode ficar no cartão.
+        # Com o --server, a telemetria vai ao MQTT e os eventos ao servidor (Issue #18).
+        items.append(("Telemetria publicada no MQTT",
+                      bool(summary["published"]) and summary["unpublished"] == 0,
+                      "-" if summary["published"] is None else "%d publicadas, %d não publicadas" % (
+                          summary["published"], summary["unpublished"])))
         items.append(("Eventos enviados ao servidor", summary["sent"] is not None and summary["unsent"] == 0,
                       "-" if summary["sent"] is None else "%d enviados, %d pendentes" % (
                           summary["sent"], summary["unsent"])))
@@ -537,6 +557,7 @@ def _drain(lines, script, status):
         kind, value = parsed
         if kind == "event":
             script.event(value, time.monotonic())
+            status["last_event"] = time.monotonic()
         elif kind == "fps":
             status["fps"] = value
         elif kind == "pi":
@@ -571,8 +592,9 @@ def parse_args(argv=None):
                         help="mata a visão com kill -9 no meio e espera ela voltar sozinha")
     parser.add_argument("--passo-c", action="store_true", help="o passo C: --esp32 e --kill-vision")
     parser.add_argument("--server", nargs="?", const="http://127.0.0.1:8000/api", metavar="URL",
-                        help="manda os eventos a este servidor (padrão: o falso, events/fake_server.py, em "
-                             "http://127.0.0.1:8000/api) e confere no fim que nenhum ficou pendente")
+                        help="manda as fotos a este servidor e publica no MQTT (padrão: o falso, "
+                             "events/fake_server.py, em http://127.0.0.1:8000/api, e o broker local na 1883) "
+                             "e confere no fim que nada ficou pendente")
     args = parser.parse_args(argv)
     if args.passo_c:
         args.esp32 = args.esp32 or "/dev/ttyUSB0"
@@ -598,9 +620,11 @@ def main(argv=None):
                "--source", args.source, "--no-gps", "--calibration-file", args.calibration_file]
     env = dict(os.environ, VGUARD_DATA=args.data, PYTHONIOENCODING="utf-8")
     if args.server:
-        # O envio dos eventos (e o Sync antigo) para o servidor pedido.
+        # A foto ao servidor pedido; o MQTT no broker local, se nada foi dito.
         env["VGUARD_BACKEND"] = args.server
         env.setdefault("VGUARD_TOKEN", "bancada")
+        env.setdefault("VGUARD_MQTT_HOST", "127.0.0.1")
+        env.setdefault("VGUARD_MQTT_PORT", "1883")
     else:
         command.append("--no-sync")
     if args.esp32:
@@ -616,7 +640,8 @@ def main(argv=None):
 
     name = "passo C" if args.esp32 and args.kill_vision else "passo 0"
     script = Script(args.seconds, args.normal, args.ask_timeout, steps=build_steps(args.kill_vision), name=name)
-    status = {"fps": None, "temp": None, "throttled": None, "problem": None, "summary": None, "falls": 0}
+    status = {"fps": None, "temp": None, "throttled": None, "problem": None, "summary": None, "falls": 0,
+              "last_event": None}
     started_wall = ended_wall = killed_wall = None
     killed_step = None
     window = "V-GUARD - bancada da visao"
@@ -664,6 +689,15 @@ def main(argv=None):
                 break
     finally:
         ended_wall = time.time()
+        if args.server and status.get("last_event") is not None and child.poll() is None:
+            # O evento só sai quando a janela dele fecha (ts + 12 s), e a foto depois.
+            remaining = status["last_event"] + CLOSE_WINDOW_S - time.monotonic()
+            if remaining > 0:
+                print("\n[bancada] esperando %.0f s a janela do último evento fechar\n" % remaining, flush=True)
+                end = time.monotonic() + remaining
+                while time.monotonic() < end and child.poll() is None:
+                    _drain(lines, script, status)
+                    time.sleep(0.2)
         if child.poll() is None:
             child.send_signal(signal.SIGTERM)
             try:

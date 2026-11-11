@@ -1,72 +1,54 @@
 """
-V-GUARD — Sincronização com o backend por Wi-Fi ou 4G, pelo HTTP antigo.
+V-GUARD — o enlace, a saúde e a identidade do dispositivo, para o publicador
+MQTT e o envio dos eventos.
 
-Envia a saúde e a telemetria pendente e só marca como confirmado o que o
-backend respondeu com 2xx (RF22):
+Até o ticket 3, este módulo também mandava a saúde e a telemetria pelo HTTP
+antigo (o Sync). Desde o ticket 4 (Issue #18), elas vão pelo MQTT
+(mqtt_publisher.py), e daqui saem só:
 
-    Wi-Fi autorizado   saúde + telemetria
-    4G                 saúde + telemetria
-    sem enlace         nada; tudo continua pendente no SD
-
-Os eventos não saem por aqui: desde o ticket 2 (Issue #14), eles esperam no
-SQLite pelo POST /api/events do ticket 3. A telemetria e a saúde passam ao
-MQTT no ticket 4.
-
-Roda em uma thread do mesmo processo do EventManager:
-
-    Sync(manager).start()
+    active_link()          "wifi", "cellular" ou None: por onde o tráfego sai
+    health(manager, link)  a saúde do contrato, para o tópico saude
+    device_token()         o token do backend, para o PUT da foto
 """
 
-import http.client
-import json
-import logging
 import os
 import socket
 import subprocess
-import threading
 import time
 import urllib.parse
-
-from event_manager import CONFIRMED, FAILED
 
 
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
 
-# Contrato PROVISÓRIO, até os tickets 3 e 4 (contrato-pi-servidor.md):
-#
-#   POST /health               JSON
-#   POST /telemetry            JSON {"items": [{id, ts, data}, ...]}
-
 BACKEND_URL = os.environ.get("VGUARD_BACKEND", "https://vguard.example/api")
 DEVICE_ID = os.environ.get("VGUARD_DEVICE", "vguard-01")
-DEVICE_TOKEN = os.environ.get("VGUARD_TOKEN", "")
 
-# Nomes das conexões Wi-Fi do NetworkManager autorizadas a levar dados.
-AUTHORIZED_WIFI = []
+# O token vem de um arquivo (VGUARD_TOKEN_FILE), para não aparecer no
+# ambiente; na falta dele, do VGUARD_TOKEN, como no ticket 3.
+DEVICE_TOKEN = os.environ.get("VGUARD_TOKEN", "")
+TOKEN_FILE = os.environ.get("VGUARD_TOKEN_FILE", "")
+
+# Nomes das conexões Wi-Fi do NetworkManager autorizadas a levar dados,
+# separados por vírgula (VGUARD_WIFI). Na bancada, a rede da casa; sem
+# nenhuma, o Wi-Fi não leva os eventos (só o 4G).
+AUTHORIZED_WIFI = [name for name in os.environ.get("VGUARD_WIFI", "").split(",") if name]
 
 # Interfaces do módulo 4G quando ele aparece como placa de rede USB.
 # (Se aparecer como modem "gsm" no NetworkManager, já é reconhecido.)
 CELLULAR_DEVICES = ["usb0", "wwan0"]
 
-# Intervalo entre ciclos de envio (RF29). Cada ciclo custa uma conexão
-# HTTPS (~6 kB) além dos dados: é o que mais pesa na franquia do 4G.
-SYNC_INTERVAL = 60.0
 
-# Após uma falha o intervalo dobra a cada tentativa, até este teto.
-RETRY_MAX = 600.0
-
-TELEMETRY_BATCH = 200
-HTTP_TIMEOUT = 20.0
-
-# Respostas em que o backend recusa o dado em si: reenviar não adianta.
-# Qualquer outro erro (rede, 5xx, 401, 404...) é tentado de novo.
-REJECTED = (400, 413, 422)
-
-
-class Retry(Exception):
-    """O backend respondeu, mas não confirmou: tentar de novo depois."""
+def device_token():
+    """O token do backend: do VGUARD_TOKEN_FILE, ou do VGUARD_TOKEN. Vazio se nenhum."""
+    if TOKEN_FILE:
+        try:
+            with open(os.path.expanduser(TOKEN_FILE)) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+    return DEVICE_TOKEN
 
 
 # ============================================================
@@ -124,133 +106,30 @@ def _read_number(path):
 
 
 # ============================================================
-# SINCRONIZAÇÃO
+# SAÚDE
 # ============================================================
 
-class Sync:
+def health(manager, link):
+    """
+    A saúde do dispositivo (contrato, tópico saude). Os campos throttled,
+    vision_fps, esp32 e time_source são do ticket 5.
+    """
+    temperature = _read_number("/sys/class/thermal/thermal_zone0/temp")
 
-    def __init__(self, manager, link=active_link):
-        self.manager = manager
-        self.link = link
-        self.last_contact = None
-        self._stop = threading.Event()
-        self._thread = None
+    # Bytes desde o boot: o contador zera a cada reinicialização.
+    cellular_bytes = sum(
+        _read_number(
+            "/sys/class/net/%s/statistics/%s" % (device, counter)
+        ) or 0
+        for device in CELLULAR_DEVICES
+        for counter in ("rx_bytes", "tx_bytes")
+    )
 
-    def sync_once(self):
-        """
-        Um ciclo de envio. Retorna o enlace usado (ou None).
-
-        Erro de rede ou Retry interrompem o ciclo; o que não foi
-        confirmado continua pendente.
-        """
-        link = self.link()
-        if link is None:
-            return None
-
-        manager = self.manager
-        url = urllib.parse.urlsplit(BACKEND_URL)
-        connection = (
-            http.client.HTTPSConnection if url.scheme == "https"
-            else http.client.HTTPConnection
-        )(url.netloc, timeout=HTTP_TIMEOUT)
-
-        def send(method, path, body, content_type="application/json"):
-            if content_type == "application/json":
-                body = json.dumps(body).encode()
-
-            connection.request(method, url.path + path, body, {
-                "Content-Type": content_type,
-                "Authorization": "Bearer " + DEVICE_TOKEN,
-                "X-Device-Id": DEVICE_ID,
-            })
-            response = connection.getresponse()
-            response.read()
-
-            if response.status in REJECTED:
-                logging.warning("backend recusou %s: %d", path, response.status)
-                return FAILED
-            if not 200 <= response.status < 300:
-                raise Retry("%s: HTTP %d" % (path, response.status))
-
-            self.last_contact = time.time()
-            return CONFIRMED
-
-        try:
-            # No começo: sinal de vida, mesmo que algum item falhe adiante.
-            send("POST", "/health", self.health(link))
-            before = manager.pending_counts()
-
-            while batch := manager.pending_telemetry(TELEMETRY_BATCH):
-                state = send("POST", "/telemetry", {"items": batch})
-                manager.ack_telemetry([item["id"] for item in batch], state)
-
-            # De novo no fim, se a fila mudou: senão o dashboard mostraria
-            # as pendências de antes do envio até o próximo ciclo.
-            if manager.pending_counts() != before:
-                send("POST", "/health", self.health(link))
-
-        finally:
-            connection.close()
-
-        return link
-
-    def health(self, link):
-        """
-        Saúde do dispositivo (RF32).
-        """
-        temperature = _read_number("/sys/class/thermal/thermal_zone0/temp")
-
-        # Bytes desde o boot: o contador zera a cada reinicialização.
-        cellular_bytes = sum(
-            _read_number(
-                "/sys/class/net/%s/statistics/%s" % (device, counter)
-            ) or 0
-            for device in CELLULAR_DEVICES
-            for counter in ("rx_bytes", "tx_bytes")
-        )
-
-        return {
-            "ts": time.time(),
-            "link": link,
-            "pending": self.manager.pending_counts(),
-            "storage": self.manager.storage_status(),
-            "temperature": temperature and temperature / 1000,
-            "cellular_bytes": cellular_bytes,
-            "last_contact": self.last_contact,
-        }
-
-    # --------------------------------------------------------
-
-    def run(self):
-        delay = SYNC_INTERVAL
-        last_link = "?"
-
-        while not self._stop.wait(delay):
-            try:
-                link = self.sync_once()
-                delay = SYNC_INTERVAL
-
-                # Avisa só quando o enlace muda, para não repetir a cada ciclo.
-                if link != last_link:
-                    logging.warning(
-                        "enlace: %s", link or "nenhum (os dados ficam no cartão)"
-                    )
-                    last_link = link
-
-            except (OSError, http.client.HTTPException, Retry) as error:
-                delay = min(delay * 2, RETRY_MAX)
-                logging.warning(
-                    "sincronização falhou (%s); nova tentativa em %.0f s",
-                    error, delay
-                )
-
-    def start(self):
-        if not DEVICE_TOKEN:
-            logging.warning("VGUARD_TOKEN vazio: o backend vai recusar tudo (401)")
-        self._thread = threading.Thread(target=self.run, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join()
+    return {
+        "ts": round(time.time(), 3),
+        "link": link,
+        "pending": {"events": manager.pending_counts()["events"]},
+        "storage": manager.storage_status(),
+        "temperature": temperature and temperature / 1000,
+        "cellular_bytes": cellular_bytes,
+    }

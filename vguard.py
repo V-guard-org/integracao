@@ -7,12 +7,13 @@ V-GUARD — o programa principal da Raspberry Pi (proposta §6.1 e §6.9).
                VisionProcess --record_event()--> EventManager --> SD
     ESP32  --> Esp32Reader   --update()-------------->      |
     GNSS   --> GpsReader     --update()-------------->      |
-                              EventSender <--pending_events--+--> POST /api/events, com a foto
-                                     Sync <--pending_telemetry--+--> saúde e telemetria (HTTP antigo)
+                            MqttPublisher <--on_telemetry---+--> MQTT: telemetria 1/s e saúde a cada 60 s
+                              EventSender <--pending_events--+--> MQTT: o evento com a janela (QoS 1)
+                                                                  HTTPS: o PUT da foto, que confirma o evento
     Pi     --> PiMonitor: temperatura e throttled no log, a cada 10 s
 
-O principal roda no Python 3.13 do sistema (o venv-principal) e não importa o
-OpenCV, o MediaPipe nem o NumPy. A visão roda no Python dela
+O principal roda no Python 3.13 do sistema (o venv-principal, com o paho-mqtt
+do requirements-principal.txt) e não importa o OpenCV, o MediaPipe nem o NumPy. A visão roda no Python dela
 (VGUARD_VISION_PYTHON) e é reiniciada se cair; uma pane dela não para a
 telemetria. O programa encerra quando a visão termina normalmente (o Q na tela
 ou --max-frames) ou com o SIGTERM/Ctrl+C. Ao encerrar, uma linha de resumo
@@ -36,8 +37,8 @@ from esp32_reader import Esp32Reader
 from event_manager import EventManager
 from event_sender import EventSender
 from gps_reader import GpsReader
+from mqtt_publisher import MqttPublisher
 from pi_monitor import PiMonitor
-from sync import Sync
 from vision_process import VisionProcess
 import options as vision_options  # vision/options.py: as opções da câmera, sem OpenCV
 
@@ -51,7 +52,8 @@ def parse_args(argv=None):
     parser.add_argument("--no-esp32", "--no-uart", dest="no_esp32", action="store_true",
                         help="Executa sem iniciar o leitor do ESP32")
     parser.add_argument("--no-gps", action="store_true", help="Executa sem iniciar o leitor do GPS")
-    parser.add_argument("--no-sync", action="store_true", help="Desativa sincronização e acesso ao backend")
+    parser.add_argument("--no-sync", action="store_true",
+                        help="Desativa o envio ao servidor: o MQTT e a foto (tudo fica no cartão)")
     vision_options.add_arguments(parser)
     args = parser.parse_args(argv)
     vision_options.check(parser, args)
@@ -65,7 +67,7 @@ def run(argv=None):
     manager = EventManager(os.environ.get("VGUARD_DATA", "dados"))
     reader = None
     gps = None
-    sync = None
+    publisher = None
     sender = None
     vision = None
     monitor = PiMonitor()
@@ -79,9 +81,9 @@ def run(argv=None):
             gps = GpsReader(manager)
             gps.start()
         if not args.no_sync:
-            sync = Sync(manager)
-            sync.start()
-            sender = EventSender(manager)
+            publisher = MqttPublisher(manager)
+            publisher.start()
+            sender = EventSender(manager, publisher)
             sender.start()
         vision = VisionProcess(manager, vision_options.to_argv(args))
         vision.start()
@@ -95,7 +97,8 @@ def run(argv=None):
         # Primeiro a visão (SIGTERM, até 5 s, kill); depois o resto; por último o banco.
         if vision is not None:
             vision.stop()
-        for worker in (reader, gps, sync, sender, monitor):
+        # O envio antes do publicador, que ele usa.
+        for worker in (reader, gps, sender, publisher, monitor):
             if worker is not None:
                 worker.stop()
         sent = sender.summary() if sender is not None else None     # antes de fechar o banco
@@ -104,6 +107,8 @@ def run(argv=None):
             parts = [vision.summary()]
             if reader is not None:
                 parts.append(f"ESP32: lost {reader.link.lost}, corrupt {reader.link.corrupt}")
+            if publisher is not None:
+                parts.append(publisher.summary())
             if sent:
                 parts.append(sent)
             parts.append(monitor.summary())

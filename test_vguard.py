@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -101,15 +100,15 @@ class ApplicationLifecycle(unittest.TestCase):
                 manager.assert_not_called()
                 vision.assert_not_called()
 
-    def test_camera_only_never_constructs_esp32_gps_or_sync(self):
-        esp32, gps, sync, sender = Mock(), Mock(), Mock(), Mock()
+    def test_camera_only_never_constructs_esp32_gps_or_sending(self):
+        esp32, gps, publisher, sender = Mock(), Mock(), Mock(), Mock()
         manager, vision_class, vision = self.run_app(
-            ["--headless", "--no-esp32", "--no-gps", "--no-sync"], Esp32Reader=esp32, GpsReader=gps, Sync=sync,
-            EventSender=sender)
+            ["--headless", "--no-esp32", "--no-gps", "--no-sync"], Esp32Reader=esp32, GpsReader=gps,
+            MqttPublisher=publisher, EventSender=sender)
         esp32.assert_not_called()
         gps.assert_not_called()
-        sync.assert_not_called()
-        sender.assert_not_called()          # o --no-sync desliga também o envio dos eventos
+        publisher.assert_not_called()       # o --no-sync desliga o MQTT
+        sender.assert_not_called()          # e o envio dos eventos
         self.assertIs(vision_class.call_args.args[0], manager.return_value)
         vision.start.assert_called_once()
         vision.stop.assert_called_once()
@@ -117,15 +116,20 @@ class ApplicationLifecycle(unittest.TestCase):
         self.monitor.return_value.start.assert_called_once()
         self.monitor.return_value.stop.assert_called_once()
 
-    def test_sync_starts_the_event_sender(self):
-        sync, sender_class = Mock(), Mock()
+    def test_the_publisher_and_the_event_sender_start_together(self):
+        publisher_class, sender_class = Mock(), Mock()
+        publisher_class.return_value.summary.return_value = "mqtt: 5 linhas publicadas, 0 não publicadas (desconectado), 1 saúde"
         sender_class.return_value.summary.return_value = "envio: 1 evento enviado, 0 pendentes"
         with self.assertLogs("vguard", level="INFO") as logs:
-            manager, _, _ = self.run_app(["--headless", "--no-esp32", "--no-gps"], Sync=sync, EventSender=sender_class)
-        sender_class.assert_called_once_with(manager.return_value)
-        sender_class.return_value.start.assert_called_once()
-        sender_class.return_value.stop.assert_called_once()
+            manager, _, _ = self.run_app(["--headless", "--no-esp32", "--no-gps"], MqttPublisher=publisher_class,
+                                         EventSender=sender_class)
+        publisher_class.assert_called_once_with(manager.return_value)
+        sender_class.assert_called_once_with(manager.return_value, publisher_class.return_value)
+        for worker in (publisher_class, sender_class):
+            worker.return_value.start.assert_called_once()
+            worker.return_value.stop.assert_called_once()
         self.assertIn("INFO:vguard:resumo: visão 13.8 FPS em média; eventos: nenhum; visão reiniciada 0 vezes; "
+                      "mqtt: 5 linhas publicadas, 0 não publicadas (desconectado), 1 saúde; "
                       "envio: 1 evento enviado, 0 pendentes; Pi até 61.2 °C, throttled sem avisos", logs.output)
 
     def test_old_no_uart_option_still_skips_esp32(self):
@@ -142,14 +146,15 @@ class ApplicationLifecycle(unittest.TestCase):
 
     def test_shutdown_stops_the_vision_first_and_closes_the_database_last(self):
         order = []
-        manager, reader, gps, sync, sender, vision = Mock(), Mock(), Mock(), Mock(), Mock(), Mock()
+        manager, reader, gps, publisher, sender, vision = Mock(), Mock(), Mock(), Mock(), Mock(), Mock()
         vision.wait.side_effect = KeyboardInterrupt     # Ctrl+C ou SIGTERM
         vision.summary.return_value = "visão 13.8 FPS em média; eventos: nenhum; visão reiniciada 0 vezes"
         vision.stop.side_effect = lambda: order.append("vision")
         reader.stop.side_effect = lambda: order.append("esp32")
         reader.link.lost, reader.link.corrupt = 0, 2
         gps.stop.side_effect = lambda: order.append("gps")
-        sync.stop.side_effect = lambda: order.append("sync")
+        publisher.stop.side_effect = lambda: order.append("mqtt")
+        publisher.summary.return_value = "mqtt: 9 linhas publicadas, 0 não publicadas (desconectado), 1 saúde"
         sender.stop.side_effect = lambda: order.append("sender")
         sender.summary.side_effect = lambda: order.append("sender summary") or "envio: 2 eventos enviados, 0 pendentes"
         manager.close.side_effect = lambda: order.append("database")
@@ -157,16 +162,17 @@ class ApplicationLifecycle(unittest.TestCase):
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "Esp32Reader", return_value=reader), \
              patch.object(vguard, "GpsReader", return_value=gps), \
-             patch.object(vguard, "Sync", return_value=sync), \
+             patch.object(vguard, "MqttPublisher", return_value=publisher), \
              patch.object(vguard, "EventSender", return_value=sender), \
              patch.object(vguard, "VisionProcess", return_value=vision), \
              self.assertLogs("vguard", level="INFO") as logs:
             vguard.run(["--headless"])
         # O resumo do envio conta os pendentes no banco: antes de fechá-lo.
-        self.assertEqual(order, ["vision", "esp32", "gps", "sync", "sender", "pi", "sender summary", "database"])
+        self.assertEqual(order, ["vision", "esp32", "gps", "sender", "mqtt", "pi", "sender summary", "database"])
         self.assertIn("INFO:vguard:encerramento solicitado", logs.output)
         self.assertIn("INFO:vguard:resumo: visão 13.8 FPS em média; eventos: nenhum; visão reiniciada 0 vezes; "
-                      "ESP32: lost 0, corrupt 2; envio: 2 eventos enviados, 0 pendentes; "
+                      "ESP32: lost 0, corrupt 2; mqtt: 9 linhas publicadas, 0 não publicadas (desconectado), 1 saúde; "
+                      "envio: 2 eventos enviados, 0 pendentes; "
                       "Pi até 61.2 °C, throttled sem avisos", logs.output)
 
     def test_resume_without_the_esp32_has_no_esp32_part(self):
@@ -187,20 +193,6 @@ class ApplicationLifecycle(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "GPS indisponível"):
                 vguard.run(["--headless"])
         self.assertEqual(order, ["esp32", "pi", "database"])
-
-    def test_sync_stop_waits_for_worker(self):
-        service = vguard.Sync(Mock())
-        exited = threading.Event()
-
-        def worker():
-            service._stop.wait()
-            exited.set()
-
-        service.run = worker
-        service.start()
-        service.stop()
-        self.assertTrue(exited.is_set())
-        self.assertFalse(service._thread.is_alive())
 
 
 if __name__ == "__main__":
