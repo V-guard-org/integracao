@@ -8,7 +8,7 @@ Python, a captura roda num auxiliar da visão:
 | Pasta     | Origem                                       | Papel                                                        |
 |-----------|----------------------------------------------|--------------------------------------------------------------|
 | `vision/` | `visao/edge/vguard/vision`                   | Câmera → MediaPipe → EAR/MAR/pose → decide *quando* há evento |
-| `events/` | `gerenciador_eventos/edge/vguard/events`     | Grava telemetria e eventos no SD e sincroniza com o backend  |
+| `events/` | `gerenciador_eventos/edge/vguard/events`     | Grava telemetria e eventos no SD e os envia ao servidor (MQTT e HTTPS) |
 | `vguard.py` | novo                                       | O programa principal: cria tudo e cuida da visão             |
 
 O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só usa o
@@ -28,7 +28,9 @@ O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só
  ESP32 ──USB───► Esp32Reader ─manager.update("imu"|"obd")────────────────────────────────────┤      │
  GNSS ───NMEA──► GpsReader ───manager.update("gps")──────────────────────────────────────────┘      │
                                                                                                    ▼
-                                                                    Sync ◄── pending_* / ack_* ──► backend
+                                            MqttPublisher ◄── on_telemetry ──┤ ──► MQTT: telemetria e saúde
+                                              EventSender ◄── pending_events ─┘ ──► MQTT: evento + janela
+                                                                                     HTTPS: PUT da foto
 ```
 
 1. **Visão** (outro processo; a janela do OpenCV, quando há, fica nele) lê um frame, extrai as métricas e
@@ -46,11 +48,11 @@ O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só
    IMU e OBD-II. As amostras só entram depois de 10 linhas válidas seguidas. Ver [o leitor do ESP32](#leitor-do-esp32).
 6. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
    em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
-7. **Sync** (thread) envia a cada 60 s a saúde e a telemetria pendente, pelo HTTP antigo, por 4G ou
-   Wi-Fi. Um item só é marcado como enviado depois do 2xx do backend (RF22).
-8. **EventSender** (thread, `events/event_sender.py`) manda cada evento ao servidor num
-   `POST /api/events`, com a foto junto, logo depois da detecção. Sem enlace ou com o servidor fora,
-   o evento espera no cartão ([o envio dos eventos](#o-envio-dos-eventos)).
+7. **MqttPublisher** (`events/mqtt_publisher.py`, Issue #18) publica cada linha de 1/s da telemetria e,
+   a cada 60 s, a saúde, com QoS 0, e se reconecta sozinho quando o broker (ou o túnel até ele) volta.
+8. **EventSender** (thread, `events/event_sender.py`) manda cada evento quando a janela de ±10 s fecha:
+   o evento pelo MQTT (QoS 1) e a foto num `PUT` HTTPS, que confirma o evento. Sem enlace ou com o
+   servidor fora, o evento espera no cartão ([o envio ao servidor](#o-envio-ao-servidor)).
 9. **PiMonitor** (thread) lê a temperatura e o `throttled` da Pi a cada 10 s e os escreve no log
    ([o que aparece no log](#o-que-aparece-no-log)). Os valores ficam guardados para a saúde.
 
@@ -105,7 +107,9 @@ event_id = manager.record_event(
   devolve `None`, o principal não conta o evento.
 - **No processo filho,** a visão chama o `record_event` do mensageiro (`ChannelSink`), com a mesma
   assinatura; quem chama o do `EventManager` é o `VisionProcess`, no principal.
-- O `events/` usa só a biblioteca padrão do Python. Toda a dependência pesada (OpenCV, MediaPipe) está em `vision/`.
+- O `events/` usa só a biblioteca padrão do Python, menos o `mqtt_publisher.py`, que precisa do `paho-mqtt`
+  (`requirements-principal.txt`, no `venv-principal`) e só o importa ao conectar. Toda a dependência pesada
+  (OpenCV, MediaPipe) está em `vision/`.
 
 ## Executar
 
@@ -176,11 +180,14 @@ ln -s $V .venv
 O `requirements-pi4-py311.txt` tem a lista completa do venv que funcionou na Pi (`uv pip freeze`).
 Na Pi 4B, o `grep Features /proc/cpuinfo` mostra `fp asimd evtstrm crc32 cpuid`, sem `aes`.
 
-O programa principal roda no Python 3.13 do sistema, num venv próprio (por enquanto sem pacote
-nenhum; o MQTT entra no ticket 4):
+O programa principal roda no Python 3.13 do sistema, num venv próprio, com o `paho-mqtt` (Issue #18).
+Os testes do MQTT precisam também do broker `mosquitto`, com o serviço desligado (o teste o inicia
+numa porta própria):
 
 ```bash
 python3 -m venv /home/vguard/vguard/venv-principal
+/home/vguard/vguard/venv-principal/bin/pip install -r requirements-principal.txt
+sudo apt install -y mosquitto && sudo systemctl disable --now mosquitto
 ```
 
 Com o modelo em `vision/models/face_landmarker.task`, execute:
@@ -198,11 +205,11 @@ visão precisa importar `picamera2` e `libcamera`; no Debian 13, a captura vai s
 auxiliar no Python do sistema (`/usr/bin/python3`, ou `--camera-python`), que envia os frames
 BGR à visão. `--source 0` continua selecionando uma webcam USB.
 
-`--no-sync` não inicia a thread nem acessa o backend. `--no-esp32` não inicia o leitor do ESP32
+`--no-sync` não inicia o MQTT nem o envio das fotos: tudo fica no cartão. `--no-esp32` não inicia o leitor do ESP32
 (`--no-uart`, o nome antigo, continua valendo).
 Para uma execução limitada, acrescente `--max-frames 120`. Ctrl+C ou SIGTERM encerram
-os componentes antes de fechar o banco. A sincronização aguarda sua thread terminar;
-se houver envio em andamento, o encerramento pode esperar o timeout da conexão.
+os componentes antes de fechar o banco. Se houver um envio em andamento, o encerramento pode
+esperar o timeout da conexão.
 
 Sem o ESP32 ou o GPS conectados, o leitor correspondente registra um aviso e tenta de novo a
 cada 2 s. A visão e a gravação de eventos continuam funcionando. Sem a câmera, a visão cai e é
@@ -236,22 +243,26 @@ INFO vision.process: visão de volta depois de 1 tentativa (6 s fora)
 ERROR vision.process: visão: erro de configuração (código 78): sem reinício; a telemetria continua
 ```
 
-- **`events.sender`** (o envio dos eventos):
+- **`events.mqtt`** (o publicador) e **`events.sender`** (o envio dos eventos):
 
 ```
-INFO events.sender: evento 12 enviado (fadiga, 46 KB, 0.8 s)
+INFO events.mqtt: MQTT conectado (127.0.0.1:18883, vguard/bancada-01/telemetria)
+WARNING events.mqtt: MQTT caiu (Unspecified error); reconectando
+WARNING events.mqtt: MQTT de volta depois de 42 s
+INFO events.sender: evento 12 enviado (fadiga, janela 21 s / 6.9 KB, foto 46 KB, 3.1 s)
+WARNING events.sender: evento 12: o servidor não gravou o evento (409 x3); publicado de novo na próxima rodada
 WARNING events.sender: envio de eventos falhou (HTTP 503); nova tentativa em 60 s
 INFO events.sender: envio de eventos de volta depois de 3 tentativas
-WARNING events.sender: servidor recusou o evento 12 (HTTP 400): fica no cartão
-ERROR events.sender: token recusado (HTTP 401): confira o VGUARD_TOKEN; nova tentativa em 60 s
-INFO events.sender: envio de eventos: sem enlace; 2 eventos esperam no cartão
+WARNING events.sender: servidor recusou a foto do evento 12 (HTTP 400): fica no cartão
+ERROR events.sender: token recusado (HTTP 401): confira o VGUARD_TOKEN_FILE; nova tentativa em 60 s
+INFO events.sender: envio de eventos: MQTT desconectado; 2 eventos esperam no cartão
 ```
 
 - **Ao encerrar** (SIGTERM, Ctrl+C ou o fim normal da visão), uma linha de resumo. A média é a
   dos `fps` da visão. A parte do ESP32 só aparece com ele ligado, e a do envio, sem o `--no-sync`:
 
 ```
-INFO vguard: resumo: visão 13.8 FPS em média; eventos: fadiga 1, distracao 1; visão reiniciada 0 vezes; ESP32: lost 0, corrupt 0; envio: 2 eventos enviados, 0 pendentes; Pi até 61.2 °C, throttled sem avisos
+INFO vguard: resumo: visão 13.8 FPS em média; eventos: fadiga 1, distracao 1; visão reiniciada 0 vezes; ESP32: lost 0, corrupt 0; mqtt: 594 linhas publicadas, 0 não publicadas (desconectado), 10 saúdes; envio: 2 eventos enviados, 0 pendentes; Pi até 61.2 °C, throttled sem avisos
 ```
 
 ### Bancada guiada da visão (passo 0 e passo C)
@@ -303,11 +314,15 @@ inteiro, e um `| tee` morreria junto, antes de escrever o resumo.
 | `VGUARD_VISION_PYTHON` | o venv 3.11 da Pi; sem ele, o Python do principal | O Python do programa da visão |
 | `VGUARD_PYTHON`  | o `venv-principal`; sem ele, o `.venv` ou o atual | O Python do principal nas ferramentas (`tools/`) |
 | `VGUARD_GPS_BAUD`| `9600`                       | Velocidade da UART do GNSS            |
-| `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend; os eventos vão a `<URL>/events` |
-| `VGUARD_DEVICE`  | `vguard-01`                  | Identificador do dispositivo (`X-Device-Id`) |
-| `VGUARD_TOKEN`   | vazio                        | Token de autenticação no backend (`Authorization: Bearer`) |
-
-As redes Wi-Fi autorizadas ficam em `AUTHORIZED_WIFI` em `events/sync.py`.
+| `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend; as fotos vão a `<URL>/events/<event_id>/photo` |
+| `VGUARD_DEVICE`  | `vguard-01`                  | O `device_id`: o meio dos tópicos MQTT e o `X-Device-Id` |
+| `VGUARD_TOKEN_FILE` | vazio                     | Arquivo com o token do backend (`Authorization: Bearer`); na bancada, `~/vguard-mqtt/token` |
+| `VGUARD_TOKEN`   | vazio                        | O token, se não houver o `VGUARD_TOKEN_FILE` |
+| `VGUARD_WIFI`    | vazio                        | Redes Wi-Fi (nomes do NetworkManager, por vírgula) que podem levar as fotos; sem nenhuma, só o 4G |
+| `VGUARD_MQTT_HOST` / `VGUARD_MQTT_PORT` | `127.0.0.1` / `1883` | O broker; na bancada, o túnel SSH em `18883` |
+| `VGUARD_MQTT_CA` | vazio (sem TLS)              | A CA do TLS; na bancada, `~/vguard-mqtt/ca.crt` |
+| `VGUARD_MQTT_USER` | o `VGUARD_DEVICE`          | O usuário do MQTT; na bancada, `pi-bancada-01` |
+| `VGUARD_MQTT_PASSWORD_FILE` | vazio             | Arquivo com a senha do MQTT; na bancada, `~/vguard-mqtt/senha` |
 Os limiares da visão (EAR, MAR, yaw, pitch e tempos) ficam em `vision/config.py`.
 
 ## Leitor do ESP32
@@ -333,48 +348,64 @@ python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 30 --obd-hz 5
 python3 tools/esp32_bench.py --port /dev/ttyUSB0 --seconds 20 --no-clock   # sem $H
 ```
 
-## O envio dos eventos
+## O envio ao servidor
 
-O `EventSender` (`events/event_sender.py`, ticket 3) manda cada evento ao servidor como o contrato pede:
+Pelo contrato 2.1 (Issue #18), todos os dados vão pelo MQTT, e só a foto vai pelo HTTPS:
 
-```
-POST <VGUARD_BACKEND>/events
-Authorization: Bearer <VGUARD_TOKEN>
-X-Device-Id: <VGUARD_DEVICE>
-multipart/form-data: dados (JSON: ts, type, score, telemetria) + foto (JPEG)
-```
-
-- **Quando:** logo depois de cada evento gravado (o `EventManager` avisa), um por vez, do mais antigo
-  ao mais novo. Os pendentes de antes (de outra execução) saem no começo.
-- **O enlace** é o do `sync.py` (`active_link()`): o Wi-Fi autorizado ou o 4G do modem no modo placa de
-  rede (`usb0`). Sem enlace, o evento espera no cartão, e o enlace é conferido de novo a cada 60 s ou
-  a cada evento novo.
-- **As respostas:**
-
-| Resposta | O evento | Depois |
+| O quê | Por onde | Quando |
 |---|---|---|
-| 200 (gravado, ou já existia) | confirmado: sai da fila | a espera volta a 60 s |
+| A telemetria | `vguard/<device>/telemetria`, QoS 0 | cada linha de 1/s, no segundo cheio (`ts` = 11.0, 12.0…) |
+| A saúde | `vguard/<device>/saude`, QoS 0 | a cada 60 s e logo depois de cada conexão |
+| O evento, com a janela de ±10 s | `vguard/<device>/eventos`, QoS 1 | quando a janela fecha, a partir de `ts + 12 s` |
+| A foto | `PUT <VGUARD_BACKEND>/events/<event_id>/photo`, o JPEG cru | 2 s depois do PUBACK do evento |
+
+- **O publicador** (`events/mqtt_publisher.py`) se reconecta sozinho, de 1 s dobrando até 30 s. Uma
+  linha de telemetria com o MQTT desconectado não é guardada para depois (QoS 0): fica pendente no cartão.
+- **O `event_id`** é `uuid5(NAMESPACE_URL, "vguard:<device>:<ts em ms>:<type>")`: o mesmo evento dá sempre
+  o mesmo, e o servidor não duplica um reenvio.
+- **A janela** sai das linhas do SQLite dos segundos de `ts − 10` a `ts + 10`: uma entrada `{ts, source, data}`
+  por sensor e por linha, sem o `age_ms`. Acima de 15 KiB, ela perde as pontas, com um aviso.
+- **O 200 da foto confirma o evento:** o backend só aceita a foto com o evento já gravado.
+
+| Resposta do `PUT` | O evento | Depois |
+|---|---|---|
+| 200 | confirmado: sai da fila | a espera volta a 60 s |
+| 409 (o evento ainda não está no banco) | pendente | novo `PUT` em 30 s; depois de 3, espera crescente e o evento é publicado de novo |
 | 400 ou 413 | recusado (`FAILED`): sai da fila e fica no cartão | segue para o próximo |
-| 401 | continua pendente (o token está errado) | a espera crescente |
-| 5xx, sem resposta em 30 s ou erro de rede | continua pendente | 60 s, dobrando até 10 min |
+| 401 | pendente (o token está errado) | a espera crescente |
+| 5xx, sem resposta em 30 s, erro de rede ou sem PUBACK | pendente | 60 s, dobrando até 10 min |
 
-  Durante a espera depois de uma falha, um evento novo não acorda o envio: ele sai junto com os
-  outros, no fim da espera, para não gastar a franquia do 4G.
+- **O enlace** é o do `sync.py` (`active_link()`): o Wi-Fi autorizado (`VGUARD_WIFI`) ou o 4G do modem no
+  modo placa de rede (`usb0`). Sem enlace ou com o MQTT desconectado, o evento espera no cartão.
 - **A foto apagada do cartão** à mão vira `FAILED`, para não travar a fila.
-- **O `--no-sync`** desliga o envio, junto com o `Sync`.
+- **O `--no-sync`** desliga o MQTT e o envio.
 
-**Servidor falso** (`events/fake_server.py`), para os testes e a bancada. Ele confere o pedido como o
-contrato manda, guarda cada evento pela chave `(device_id, ts, type)` num `eventos.jsonl`, com a foto
-ao lado, e responde 200 sem duplicar num reenvio, também depois de reiniciado. Aceita também o
-`/health` e o `/telemetry` do `Sync`:
+**Servidor falso** (`events/fake_server.py`), para os testes e a bancada: o backend (os dois `PUT`, com o
+409 sem o evento) e, com o `--mqtt`, também o consumidor, que assina os três tópicos:
 
 ```bash
-python3 events/fake_server.py --dir /home/vguard/vguard/servidor-falso      # http://127.0.0.1:8000/api
+/usr/sbin/mosquitto -p 1883 &
+/home/vguard/vguard/venv-principal/bin/python events/fake_server.py --mqtt 127.0.0.1:1883 \
+  --dir /home/vguard/vguard/servidor-falso                                  # http://127.0.0.1:8000/api
 .venv/bin/python tools/vision_bench.py --passo-c --server                   # noutro terminal
 ```
 
-Com o `--server`, a bancada guiada roda o principal sem o `--no-sync`, manda os eventos ao servidor
-(o falso, por padrão) e confere no fim que nenhum ficou pendente.
+Com o `--server`, a bancada guiada roda o principal sem o `--no-sync`, espera a janela do último evento
+fechar e confere no fim que toda a telemetria foi publicada e que nenhum evento ficou pendente.
+
+**Os ensaios com o servidor de verdade** (`tools/server_bench.py`): o leitor do ESP32, o publicador e o
+envio, de verdade, e eventos sintéticos com a foto `tools/foto-sintetica.jpg` (640×480). No fim, o
+relatório para o servidor: os `ts` publicados e as lacunas, as quedas e as voltas do MQTT, e cada evento
+com o `event_id` e os status do `PUT`.
+
+```bash
+VGUARD_DEVICE=bancada-01 VGUARD_MQTT_PORT=18883 VGUARD_MQTT_CA=~/vguard-mqtt/ca.crt \
+VGUARD_MQTT_USER=pi-bancada-01 VGUARD_MQTT_PASSWORD_FILE=~/vguard-mqtt/senha \
+VGUARD_BACKEND=https://vguard-projeto.mytunnel.org/api VGUARD_TOKEN_FILE=~/vguard-mqtt/token \
+VGUARD_WIFI=<a rede da bancada> \
+  /home/vguard/vguard/venv-principal/bin/python tools/server_bench.py --port /dev/ttyUSB0 \
+  --seconds 300 --evento-a 60 --data-dir /home/vguard/vguard/dados-ensaio-1
+```
 
 ## O que fica no SD
 
@@ -384,15 +415,16 @@ dados/
 └── photos/<ts em ms>-<tipo>.jpg    a foto de cada evento, como 1793980812437-fadiga.jpg
 ```
 
-Cada evento é o que vai ao servidor no `POST /api/events` (contrato com o servidor, ticket 3):
+A linha de telemetria do segundo N tem `ts` = N e a última leitura de cada sensor com `ts` em [N, N+1).
+Cada evento tem (contrato 2.1, Issue #18):
 
 - `id`: o id local, inteiro;
-- `ts`: o instante do quadro, ao milissegundo. A chave no servidor é `(device_id, ts, type)`;
+- `ts`: o instante do quadro, ao milissegundo. O `event_id` do servidor sai de `(device_id, ts, type)`;
 - `type` (`fadiga` ou `distracao`) e `score`;
 - `telemetria`: o retrato, com a última amostra de cada sensor e o `ts` dela, menos as com mais de 3 s.
   Pode ser `{}`;
 - `photo`: o nome da foto, gravada antes da linha no banco;
-- `synced`: um estado de envio só, porque o evento e a foto vão juntos.
+- `synced`: um estado de envio só: o 200 da foto confirma o evento e a foto juntos.
 
 **Banco do modelo antigo** (UUID e janela de 10 s, até 09/11). Na primeira abertura, ele vai para o lado
 com as fotos, sem converter e sem apagar nada: `vguard-antigo.db` e `photos-antigo/`. Se esses nomes já
@@ -416,6 +448,7 @@ python3 -B vision/test_calibration.py
 
 ```bash
 (cd events && python3 test_event_manager.py && python3 test_event_sender.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py && python3 test_pi_monitor.py && python3 test_vision_process.py)
+(cd events && /home/vguard/vguard/venv-principal/bin/python test_mqtt_publisher.py)     # o MQTT: paho e mosquitto
 python3 -B test_vguard.py
 (cd tools && python3 test_vision_bench.py)
 ```
@@ -427,6 +460,8 @@ Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`
 `vision/test_program.py` roda o programa da visão de verdade com um vídeo sintético (precisa do venv da visão).
 O `test_vguard.py` confere que o principal não importa o OpenCV, o MediaPipe nem o NumPy.
 `events/test_esp32_reader.py` e `events/test_gps_reader.py` usam um ESP32 e um receptor falsos num pty.
+`events/test_mqtt_publisher.py` inicia um `mosquitto` de verdade numa porta livre; sem o `paho-mqtt` ou o
+`mosquitto`, os testes dele são pulados, com o motivo. O `test_event_sender.py` usa um publicador falso.
 Os testes de `events/` precisam de Linux (na Pi ou no WSL).
 
 Teste opt-in da aplicação com câmera CSI e persistência reais, sem UART/backend,

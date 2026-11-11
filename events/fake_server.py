@@ -33,6 +33,7 @@ import http.server
 import json
 import os
 import re
+import signal
 import threading
 import time
 
@@ -264,6 +265,8 @@ def main(argv=None):
         mqtt = (host or "127.0.0.1", int(port))
     server = FakeServer(args.dir, port=args.port, host=args.host, token=args.token, quiet=False, mqtt=mqtt)
     server.consumer_enabled = not args.sem_consumidor
+    # O SIGTERM (kill) para como o Ctrl+C, com o resumo.
+    signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt))
     print("[servidor falso] em %s, pasta %s, com %d eventos já guardados%s. Ctrl+C para parar."
           % (server.url, os.path.abspath(args.dir), len(server.events),
              ", consumidor no broker %s:%d" % mqtt if mqtt else ""), flush=True)
