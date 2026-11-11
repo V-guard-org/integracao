@@ -8,12 +8,17 @@ Tudo é gravado no cartão SD antes de qualquer tentativa de envio (RF14):
     ├── vguard.db                       SQLite: a telemetria (1 linha por segundo) e os eventos
     └── photos/<ts em ms>-<tipo>.jpg    a foto de cada evento (RNF13)
 
-Um evento é o que o servidor recebe no POST /api/events: o ts (ao
-milissegundo), o tipo, o score, o retrato da telemetria naquele instante e a
-foto, que vão juntos. A chave no servidor é (device_id, ts, type).
+A telemetria tem uma linha por segundo cheio (ticket 4, Issue #18): a linha
+do segundo N tem ts = N e a última leitura de cada sensor com ts em [N, N+1).
+Cada linha gravada é avisada ao publicador MQTT (on_telemetry).
+
+Um evento é o ts (ao milissegundo), o tipo, o score, o retrato da telemetria
+naquele instante e a foto. Pelo contrato 2.1, ele vai ao servidor pelo MQTT,
+com a janela de ±10 s tirada da telemetria daqui, e a foto pelo HTTPS.
 
 Quem escreve: a visão (record_event, pelo VisionProcess) e os leitores do
-ESP32 e do GPS (update). Quem lê: o envio (pending_* e ack_*).
+ESP32 e do GPS (update). Quem lê: o publicador e o envio (pending_*,
+telemetry_window e ack_*).
 
 Um banco do modelo antigo (UUID e janela de 10 s, até 09/11) vai para o lado
 na abertura, com as fotos, sem converter e sem apagar nada: vguard-antigo.db
@@ -22,6 +27,7 @@ e photos-antigo/.
 
 import json
 import logging
+import math
 import os
 import shutil
 import sqlite3
@@ -34,9 +40,6 @@ log = logging.getLogger("events")
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
-
-# Intervalo de consolidação da telemetria gravada no SD (RNF24).
-TELEMETRY_INTERVAL = 1.0
 
 # Tempo mínimo entre dois eventos do mesmo tipo. Sem isso, a visão
 # geraria um evento por quadro enquanto a boca estivesse aberta.
@@ -195,8 +198,13 @@ class EventManager:
         self._remove_orphans()
 
         self._latest = {}       # fonte -> última amostra, com o ts dela
-        self._last_flush = 0.0
+        self._row_second = None # o segundo da linha em montagem
+        self._row = {}          # fonte -> última amostra desse segundo
         self._last_event = {}   # tipo -> ts do último evento
+
+        # Chamado com {"id", "ts", "data"} a cada linha de telemetria gravada,
+        # fora da trava: o publicador MQTT (ticket 4).
+        self.on_telemetry = None
 
         # Ligado a cada evento gravado: o envio (EventSender) espera nele para
         # mandar o evento logo depois da detecção (ticket 3).
@@ -211,28 +219,61 @@ class EventManager:
         Recebe uma amostra de "gps", "imu" ou "obd" (dict). Um dict vazio é
         o sensor sem dado no momento: fica só o horário.
 
-        Pode ser chamado na frequência do sensor: só uma linha
-        consolidada por TELEMETRY_INTERVAL vai para o SD.
+        Pode ser chamado na frequência do sensor. Vai para o SD uma linha por
+        segundo cheio: a do segundo N (ts = N) é gravada quando chega a
+        primeira leitura do segundo N+1 ou depois, com a última leitura de
+        cada sensor de [N, N+1). Um segundo sem nenhuma leitura não tem linha.
         """
         ts = time.time() if ts is None else ts
+        second = math.floor(ts)
+        row = None
 
         with self._lock:
             self._latest[source] = {"ts": ts, **data}
 
-            if ts - self._last_flush < TELEMETRY_INTERVAL:
+            if self._row_second is None:
+                self._row_second = second
+            elif second > self._row_second:
+                if self._row:
+                    row = self._write_row()
+                self._row_second, self._row = second, {}
+            elif second < self._row_second:
+                # Leitura atrasada de um segundo já fechado: só vale para o
+                # retrato do evento (_latest).
                 return
 
-            # Só as fontes com leitura nova desde a última linha.
-            fresh = {
-                s: d for s, d in self._latest.items()
-                if d["ts"] > self._last_flush
-            }
-            with self._db:
-                self._db.execute(
-                    "INSERT INTO telemetry (ts, data) VALUES (?, ?)",
-                    (ts, json.dumps(fresh))
-                )
-            self._last_flush = ts
+            self._row[source] = {"ts": ts, **data}
+
+        self._notify(row)
+
+    def _write_row(self):
+        """Grava a linha do segundo em montagem. Chamar com a trava."""
+        ts = float(self._row_second)
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO telemetry (ts, data) VALUES (?, ?)",
+                (ts, json.dumps(self._row))
+            )
+        return {"id": cursor.lastrowid, "ts": ts, "data": self._row}
+
+    def _notify(self, row):
+        if row is not None and self.on_telemetry is not None:
+            try:
+                self.on_telemetry(row)
+            except Exception:
+                log.exception("o aviso da linha de telemetria falhou")
+
+    def telemetry_window(self, start, end):
+        """
+        As linhas de telemetria com ts de start a end, em ordem: [{ts, data}].
+        Para a janela de ±10 s do evento (contrato 2.1).
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT ts, data FROM telemetry WHERE ts >= ? AND ts <= ? ORDER BY ts, id",
+                (start, end)
+            ).fetchall()
+        return [{"ts": r["ts"], "data": json.loads(r["data"])} for r in rows]
 
     # --------------------------------------------------------
     # EVENTOS
@@ -421,5 +462,9 @@ class EventManager:
     # --------------------------------------------------------
 
     def close(self):
+        """Grava a linha do segundo em montagem e fecha o banco."""
         with self._lock:
+            if self._row:
+                self._write_row()
+                self._row = {}
             self._db.close()

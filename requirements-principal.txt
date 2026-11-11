@@ -1,0 +1,4 @@
+# O programa principal (vguard.py) no Python 3.13 do sistema da Pi, no venv-principal
+# (proposta §6.9). Só o MQTT do ticket 4 (Issue #18); o resto é a biblioteca padrão.
+#   /home/vguard/vguard/venv-principal/bin/pip install -r requirements-principal.txt
+paho-mqtt==2.1.0
