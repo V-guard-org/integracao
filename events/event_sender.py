@@ -271,7 +271,12 @@ class EventSender:
             if trimmed:
                 log.warning("evento %d: a janela passou de %d KB e perdeu as pontas (ficaram %d s)",
                             event["id"], MAX_MESSAGE // 1024, seconds)
-            if not self.publisher.publish_event(text):
+            try:
+                published = self.publisher.publish_event(text)
+            except (OSError, http.client.HTTPException) as error:
+                self._failed(str(error) or type(error).__name__)
+                return FAILURE
+            if not published:
                 self._failed("o broker não confirmou o evento (sem PUBACK)")
                 return FAILURE
             self._published = event["id"]

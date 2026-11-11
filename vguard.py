@@ -37,8 +37,10 @@ from esp32_reader import Esp32Reader
 from event_manager import EventManager
 from event_sender import EventSender
 from gps_reader import GpsReader
+from http_demo_publisher import HttpDemoPublisher
 from mqtt_publisher import MqttPublisher
 from pi_monitor import PiMonitor
+from simulated_telemetry import SimulatedTelemetry
 from vision_process import VisionProcess
 import options as vision_options  # vision/options.py: as opções da câmera, sem OpenCV
 
@@ -52,21 +54,33 @@ def parse_args(argv=None):
     parser.add_argument("--no-esp32", "--no-uart", dest="no_esp32", action="store_true",
                         help="Executa sem iniciar o leitor do ESP32")
     parser.add_argument("--no-gps", action="store_true", help="Executa sem iniciar o leitor do GPS")
+    parser.add_argument("--simulate-telemetry", action="store_true",
+                        help="Gera IMU, OBD-II e GPS fictícios no lugar dos sensores")
+    parser.add_argument("--demo-http", action="store_true",
+                        help="Usa a API HTTP do backend na demonstração semissimulada")
     parser.add_argument("--no-sync", action="store_true",
                         help="Desativa o envio ao servidor: o MQTT e a foto (tudo fica no cartão)")
     vision_options.add_arguments(parser)
     args = parser.parse_args(argv)
     vision_options.check(parser, args)
+    if args.demo_http and (not args.simulate_telemetry or args.no_sync):
+        parser.error("--demo-http exige --simulate-telemetry e envio habilitado")
     if args.calibrate and args.calibration_file is None:
-        args.calibration_file = Path(os.environ.get("VGUARD_DATA", "dados")) / "calibration-driver.json"
+        args.calibration_file = Path(data_directory(args)) / "calibration-driver.json"
     return args
+
+
+def data_directory(args):
+    default = "dados-simulados" if args.simulate_telemetry else "dados"
+    return os.environ.get("VGUARD_DATA", default)
 
 
 def run(argv=None):
     args = parse_args(argv)
-    manager = EventManager(os.environ.get("VGUARD_DATA", "dados"))
+    manager = EventManager(data_directory(args))
     reader = None
     gps = None
+    simulation = None
     publisher = None
     sender = None
     vision = None
@@ -74,14 +88,19 @@ def run(argv=None):
 
     try:
         monitor.start()
-        if not args.no_esp32:
-            reader = Esp32Reader(manager)
-            reader.start()
-        if not args.no_gps:
-            gps = GpsReader(manager)
-            gps.start()
+        if args.simulate_telemetry:
+            log.info("modo semissimulado: IMU, OBD-II e GPS fictícios")
+            simulation = SimulatedTelemetry(manager)
+            simulation.start()
+        else:
+            if not args.no_esp32:
+                reader = Esp32Reader(manager)
+                reader.start()
+            if not args.no_gps:
+                gps = GpsReader(manager)
+                gps.start()
         if not args.no_sync:
-            publisher = MqttPublisher(manager)
+            publisher = HttpDemoPublisher(manager) if args.demo_http else MqttPublisher(manager)
             publisher.start()
             sender = EventSender(manager, publisher)
             sender.start()
@@ -98,7 +117,7 @@ def run(argv=None):
         if vision is not None:
             vision.stop()
         # O envio antes do publicador, que ele usa.
-        for worker in (reader, gps, sender, publisher, monitor):
+        for worker in (reader, gps, simulation, sender, publisher, monitor):
             if worker is not None:
                 worker.stop()
         sent = sender.summary() if sender is not None else None     # antes de fechar o banco

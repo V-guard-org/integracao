@@ -89,6 +89,42 @@ class ApplicationLifecycle(unittest.TestCase):
         self.assertEqual(option(argv, "--source"), "0")
         self.assertNotIn("--infrared", argv)
 
+    def test_simulation_replaces_both_readers_and_keeps_camera_and_sending(self):
+        for flags in ([], ["--demo-http"], ["--no-sync"]):
+            with self.subTest(flags=flags):
+                esp32, gps, simulation = Mock(), Mock(), Mock()
+                mqtt, http, sender = Mock(), Mock(), Mock()
+                mqtt.return_value.summary.return_value = "MQTT"
+                http.return_value.summary.return_value = "HTTP"
+                sender.return_value.summary.return_value = "envio"
+                with patch.dict(os.environ):
+                    os.environ.pop("VGUARD_DATA", None)
+                    manager, vision, _ = self.run_app(
+                        ["--headless", "--simulate-telemetry", "--source", "picamera2", *flags],
+                        Esp32Reader=esp32, GpsReader=gps, SimulatedTelemetry=simulation,
+                        MqttPublisher=mqtt, HttpDemoPublisher=http, EventSender=sender)
+                manager.assert_called_once_with("dados-simulados")
+                esp32.assert_not_called()
+                gps.assert_not_called()
+                simulation.assert_called_once_with(manager.return_value)
+                simulation.return_value.start.assert_called_once()
+                simulation.return_value.stop.assert_called_once()
+                self.assertEqual(option(vision_argv(vision), "--source"), "picamera2")
+                if flags == ["--no-sync"]:
+                    mqtt.assert_not_called()
+                    http.assert_not_called()
+                    sender.assert_not_called()
+                else:
+                    publisher, unused = (http, mqtt) if flags else (mqtt, http)
+                    unused.assert_not_called()
+                    publisher.assert_called_once_with(manager.return_value)
+                    sender.assert_called_once_with(manager.return_value, publisher.return_value)
+
+    def test_demo_http_requires_simulation_with_sending_enabled(self):
+        for flags in (["--demo-http"], ["--demo-http", "--simulate-telemetry", "--no-sync"]):
+            with self.subTest(flags=flags), self.assertRaises(SystemExit):
+                vguard.parse_args(flags)
+
     def test_invalid_camera_options_fail_before_database_creation(self):
         for options in (["--fps", "nan"], ["--fps", "0"], ["--width", "0"],
                         ["--camera-num", "-1"], ["--source", "0", "--infrared"],

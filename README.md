@@ -145,6 +145,42 @@ Olhos são um sinal auxiliar da distração e não disparam fadiga isoladamente.
 Os [resultados medidos na Pi 4B](docs/validacao-ov5647.md) incluem captura real
 com rosto, pouca luz e iluminação IR.
 
+### Demonstração em sala com câmera real e telemetria simulada
+
+O modo `--simulate-telemetry` gera IMU, OBD-II e um trajeto de GPS fictícios enquanto a Pi
+está parada. A câmera e o detector continuam gerando os eventos e JPEGs a partir do motorista
+em frente à câmera. O ESP32 e o receptor GNSS podem ficar desconectados.
+
+Para usar o backend com a API HTTP do dashboard, cadastre um dispositivo exclusivo para a
+demonstração com `python3 app.py novo-dispositivo vguard-demo` no backend. Opcionalmente,
+identifique-o na frota com `python3 app.py carro vguard-demo "Demonstração (telemetria simulada)" DEMO Branco`.
+Na Pi, com os ambientes do principal e da visão preparados conforme a seção seguinte:
+
+```bash
+export VGUARD_BACKEND='https://seu-servidor/api'
+export VGUARD_DEVICE='vguard-demo'
+export VGUARD_TOKEN_FILE="$HOME/vguard-demo/token"
+export VGUARD_WIFI='nome da conexão Wi-Fi no NetworkManager'
+/home/vguard/vguard/venv-principal/bin/python vguard.py --headless \
+  --simulate-telemetry --demo-http --calibration-file /caminho/do/perfil-calibrado.json
+```
+
+Coloque o token do dispositivo no arquivo indicado por `VGUARD_TOKEN_FILE`. O `VGUARD_WIFI`
+precisa incluir o nome da **conexão** Wi-Fi usada na sala. Para 4G, o modem deve fornecer
+uma rota até o servidor, como no funcionamento normal. Use um perfil calibrado para a
+câmera, resolução e posição da demonstração. Se precisar calibrar em sala, abra a aplicação
+com interface gráfica e `--calibrate` e siga [a calibração guiada](docs/calibracao-motorista.md).
+Para a C525, acrescente `--source 0`.
+
+Abra o dispositivo `vguard-demo` na frota. Com a visão pronta, simule um bocejo de pelo
+menos 1,5 s diante da câmera. Deixe a Pi rodando após a detecção para completar a janela
+de telemetria de 10 s depois do evento e aguarde a atualização do dashboard, que roda a
+cada 10 s. O detalhe do evento exibe a foto quando o servidor confirma o JPEG.
+
+Os dados ficam em `dados-simulados/` por padrão. Se definir `VGUARD_DATA`, use uma pasta
+exclusiva da demonstração. Omita `--demo-http` para usar o fluxo MQTT da integração com um
+servidor compatível, ou use `--simulate-telemetry --no-sync` para testar localmente.
+
 ### Raspberry Pi 4B: ambiente validado e execução local
 
 Na Pi 4B sem AES, utilize Python 3.11 e as versões de `requirements-pi4-py311.txt`.

@@ -16,11 +16,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 from event_manager import CONFIRMED, FAILED, PENDING, EventManager
 from event_sender import (DONE, FAILURE, MAX_MESSAGE, NO_LINK, NOT_YET, EventSender, event_id,
                           event_message, window_entries)
 from fake_server import MAX_PHOTO, FakeServer
+from http_demo_publisher import HttpDemoPublisher
+import simulated_telemetry
 
 # Um "JPEG" com todos os bytes, inclusive \r e \n, para conferir que a foto chega inteira.
 JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 40 + b"\xff\xd9"
@@ -133,8 +136,57 @@ class MessageTest(unittest.TestCase):
         self.assertGreaterEqual(kept[-1], 1000.0)
         self.assertLessEqual(abs((kept[0] + kept[-1]) / 2 - 1000.437), 1.0)
 
+    def test_demo_publishes_health_and_only_confirms_accepted_telemetry(self):
+        row = {"id": 1, "ts": 1000.0, "data": {"gps": {"lat": -23.55, "lon": -46.65}}}
+        for failure in (None, OSError("HTTP 503")):
+            with self.subTest(failure=failure):
+                manager = Mock()
+                manager.pending_telemetry.return_value = [row]
+                publisher = HttpDemoPublisher(manager)
+                health = {"link": "cellular"}
+                with patch("sync.active_link", return_value="cellular"), \
+                     patch("sync.health", return_value=health), \
+                     patch.object(publisher._stop, "wait", side_effect=lambda _: publisher.stop()), \
+                     patch.object(publisher, "_request", side_effect=[None, failure]) as request:
+                    publisher._run()
+                self.assertEqual(
+                    [(call.args[0], call.args[1], json.loads(call.args[2])) for call in request.call_args_list],
+                    [("POST", "/health", health), ("POST", "/telemetry", {"items": [row]})],
+                )
+                if failure is None:
+                    manager.ack_telemetry.assert_called_once_with([row["id"]])
+                else:
+                    manager.ack_telemetry.assert_not_called()
+
 
 class RequestTest(SenderTest):
+
+    def test_demo_sends_event_with_simulated_telemetry_and_photo_by_http(self):
+        simulation = simulated_telemetry.SimulatedTelemetry(self.manager)
+        for second in range(989, 1012):
+            with patch.object(simulated_telemetry.time, "time", return_value=second + 0.25):
+                simulation._publish(second - 989)
+            if second == 1000:
+                local_id = self.record(ts=1000.5)
+
+        with patch.multiple("sync", BACKEND_URL=self.server.url, DEVICE_ID="vguard-teste"), \
+             patch("sync.device_token", return_value="segredo"):
+            self.publisher = HttpDemoPublisher(self.manager)
+            sender = self.new_sender()
+            self.assertEqual(self.send(sender), DONE)
+
+        uuid_text = event_id("vguard-teste", 1000.5, "fadiga")
+        self.assertEqual([(method, path) for method, path, _ in self.server.requests], [
+            ("PUT", f"/api/events/{uuid_text}"),
+            ("PUT", f"/api/events/{uuid_text}/photo"),
+        ])
+        event = self.server.events[uuid_text]
+        self.assertEqual(set(event["data"]), {"imu", "obd", "gps"})
+        self.assertEqual(event["data"]["obd"]["speed"], event["data"]["gps"]["speed"])
+        self.assertEqual({item["source"] for item in event["window"]}, {"imu", "obd", "gps"})
+        with open(os.path.join(self.server.folder, event["foto"]), "rb") as photo:
+            self.assertEqual(photo.read(), JPEG)
+        self.assertEqual(self.state(local_id), CONFIRMED)
 
     def test_event_by_mqtt_and_photo_by_put(self):
         for second in range(985, 1000):         # a telemetria de 985 a 1015, com o evento no meio
