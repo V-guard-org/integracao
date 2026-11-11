@@ -103,7 +103,7 @@ class ApplicationLifecycle(unittest.TestCase):
     def test_camera_only_never_constructs_esp32_gps_or_sending(self):
         esp32, gps, publisher, sender = Mock(), Mock(), Mock(), Mock()
         manager, vision_class, vision = self.run_app(
-            ["--headless", "--no-esp32", "--no-gps", "--no-sync"], Esp32Reader=esp32, GpsReader=gps,
+            ["--headless", "--no-esp32", "--no-gps", "--no-sync"], Esp32Reader=esp32, ModemReader=gps,
             MqttPublisher=publisher, EventSender=sender)
         esp32.assert_not_called()
         gps.assert_not_called()
@@ -161,7 +161,7 @@ class ApplicationLifecycle(unittest.TestCase):
         self.monitor.return_value.stop.side_effect = lambda: order.append("pi")
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "Esp32Reader", return_value=reader), \
-             patch.object(vguard, "GpsReader", return_value=gps), \
+             patch.object(vguard, "ModemReader", return_value=gps), \
              patch.object(vguard, "MqttPublisher", return_value=publisher), \
              patch.object(vguard, "EventSender", return_value=sender), \
              patch.object(vguard, "VisionProcess", return_value=vision), \
@@ -189,7 +189,7 @@ class ApplicationLifecycle(unittest.TestCase):
         self.monitor.return_value.stop.side_effect = lambda: order.append("pi")
         with patch.object(vguard, "EventManager", return_value=manager), \
              patch.object(vguard, "Esp32Reader", return_value=reader), \
-             patch.object(vguard, "GpsReader", side_effect=RuntimeError("GPS indisponível")):
+             patch.object(vguard, "ModemReader", side_effect=RuntimeError("GPS indisponível")):
             with self.assertRaisesRegex(RuntimeError, "GPS indisponível"):
                 vguard.run(["--headless"])
         self.assertEqual(order, ["esp32", "pi", "database"])

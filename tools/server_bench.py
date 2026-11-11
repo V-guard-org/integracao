@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "events"))
 import esp32_reader                                      # noqa: E402
 import sync                                              # noqa: E402
 from esp32_reader import Esp32Reader                     # noqa: E402
+from modem_reader import ModemReader                     # noqa: E402
 from event_manager import CONFIRMED, EventManager        # noqa: E402
 from event_sender import EventSender                     # noqa: E402
 from mqtt_publisher import MqttPublisher                 # noqa: E402
@@ -53,7 +54,36 @@ def gaps(published):
     return found
 
 
-def report(args, publisher, sender, manager, published, unpublished, started, ended):
+def gps_report(modem, manager, started, ended):
+    """O GNSS no ensaio: a primeira posição, as linhas com gps e as horas (ticket 6)."""
+    lines = ["", "GNSS (pela porta AT do modem, %s):" % modem.port]
+    if modem.first_fix_after is None:
+        lines.append("  nenhuma posição no ensaio")
+    else:
+        lines.append("  primeira posição %.0f s depois de ligar o GNSS; %d leituras com posição"
+                     % (modem.first_fix_after, modem.fixes))
+    rows = manager.telemetry_window(int(started), int(ended))
+    with_gps = [row for row in rows if set(row["data"].get("gps", {})) - {"ts"}]
+    only_ts = [row for row in rows if "gps" in row["data"] and row not in with_gps]
+    lines.append("  telemetria: %d linhas com posição, %d só com o horário do gps, %d sem gps"
+                 % (len(with_gps), len(only_ts), len(rows) - len(with_gps) - len(only_ts)))
+    if with_gps:
+        last = with_gps[-1]["data"]["gps"]
+        speeds = [row["data"]["gps"]["speed"] for row in with_gps]
+        lines.append("  última posição: %.6f, %.6f; velocidade de %.1f a %.1f km/h (média %.1f)"
+                     % (last["lat"], last["lon"], min(speeds), max(speeds), sum(speeds) / len(speeds)))
+    now_wall, now_mono = time.time(), time.monotonic()
+    for name, sample in (("GNSS", modem.gnss_time), ("operadora", modem.operator_time)):
+        if sample is None:
+            lines.append("  hora (%s): não veio" % name)
+        else:
+            utc, read_at = sample
+            offset = (now_wall - (now_mono - read_at)) - utc
+            lines.append("  relógio da Pi − %s: %+.1f s" % (name, offset))
+    return lines
+
+
+def report(args, publisher, sender, manager, published, unpublished, started, ended, modem=None):
     lines = ["", "=" * 72, "RELATÓRIO PARA O SERVIDOR (ensaio de %s, %s a %s)" % (
         time.strftime("%d/%m/%Y", time.localtime(started)), clock(started), clock(ended)), "=" * 72]
     lines.append("device_id: %s; usuário MQTT: %s; broker: %s:%d; backend: %s" % (
@@ -102,6 +132,8 @@ def report(args, publisher, sender, manager, published, unpublished, started, en
         lines.append("  %d. não chegou a ser enviado (PENDENTE)" % local_id)
     if not states:
         lines.append("  nenhum evento")
+    if modem is not None:
+        lines.extend(gps_report(modem, manager, started, ended))
     lines.append("=" * 72)
     return "\n".join(lines)
 
@@ -116,6 +148,7 @@ def main(argv=None):
     parser.add_argument("--port", default=esp32_reader.PORT,
                         help="porta do ESP32 (padrão: VGUARD_ESP32 ou /dev/vguard-esp32)")
     parser.add_argument("--no-esp32", action="store_true", help="sem o ESP32: só a saúde e os eventos")
+    parser.add_argument("--no-gps", action="store_true", help="sem o leitor do modem (o GNSS pela porta AT)")
     parser.add_argument("--data-dir", help="pasta nova (padrão: dados-ensaio-<data> na pasta atual)")
     args = parser.parse_args(argv)
 
@@ -133,6 +166,7 @@ def main(argv=None):
     publisher = MqttPublisher(manager)
     sender = EventSender(manager, publisher)
     reader = None if args.no_esp32 else Esp32Reader(manager, args.port)
+    modem = None if args.no_gps else ModemReader(manager)
     logging.info("ensaio por %g s em %s: device %s, broker %s:%d (TLS %s), backend %s, token %s",
                  args.seconds, data_dir, publisher.device, publisher.host, publisher.port,
                  "sim" if publisher.ca else "não", sender.url,
@@ -152,6 +186,8 @@ def main(argv=None):
     sender.start()
     if reader:
         reader.start()
+    if modem:
+        modem.start()
 
     stop = threading.Event()
 
@@ -188,11 +224,13 @@ def main(argv=None):
     finally:
         if reader:
             reader.stop()
+        if modem:
+            modem.stop()
         sender.stop()
         manager.on_telemetry = original
         publisher.stop()
         ended = time.time()
-        text = report(args, publisher, sender, manager, published, unpublished, started, ended)
+        text = report(args, publisher, sender, manager, published, unpublished, started, ended, modem)
         pending = manager.pending_counts()["events"]
         manager.close()
     print(text)

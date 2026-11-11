@@ -6,7 +6,7 @@ V-GUARD — o programa principal da Raspberry Pi (proposta §6.1 e §6.9).
                    v
                VisionProcess --record_event()--> EventManager --> SD
     ESP32  --> Esp32Reader   --update()-------------->      |
-    GNSS   --> GpsReader     --update()-------------->      |
+    modem  --> ModemReader   --update("gps")--------->      |   (o GNSS pela porta AT; a hora de reserva)
                             MqttPublisher <--on_telemetry---+--> MQTT: telemetria 1/s e saúde a cada 60 s
                               EventSender <--pending_events--+--> MQTT: o evento com a janela (QoS 1)
                                                                   HTTPS: o PUT da foto, que confirma o evento
@@ -36,7 +36,7 @@ sys.path[:0] = [os.path.join(HERE, "events"), os.path.join(HERE, "vision")]
 from esp32_reader import Esp32Reader
 from event_manager import EventManager
 from event_sender import EventSender
-from gps_reader import GpsReader
+from modem_reader import ModemReader
 from mqtt_publisher import MqttPublisher
 from pi_monitor import PiMonitor
 from vision_process import VisionProcess
@@ -51,7 +51,8 @@ def parse_args(argv=None):
     # --no-uart é o nome antigo, de quando o ESP32 ficava na UART.
     parser.add_argument("--no-esp32", "--no-uart", dest="no_esp32", action="store_true",
                         help="Executa sem iniciar o leitor do ESP32")
-    parser.add_argument("--no-gps", action="store_true", help="Executa sem iniciar o leitor do GPS")
+    parser.add_argument("--no-gps", action="store_true",
+                        help="Executa sem iniciar o leitor do modem (o GNSS pela porta AT)")
     parser.add_argument("--no-sync", action="store_true",
                         help="Desativa o envio ao servidor: o MQTT e a foto (tudo fica no cartão)")
     vision_options.add_arguments(parser)
@@ -78,7 +79,7 @@ def run(argv=None):
             reader = Esp32Reader(manager)
             reader.start()
         if not args.no_gps:
-            gps = GpsReader(manager)
+            gps = ModemReader(manager)
             gps.start()
         if not args.no_sync:
             publisher = MqttPublisher(manager)

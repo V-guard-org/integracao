@@ -26,7 +26,7 @@ O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só
             pronto, fps a cada 10 s ═════════════════════►  (reinicia a visão)               ▲      │
                                                                                             │      │
  ESP32 ──USB───► Esp32Reader ─manager.update("imu"|"obd")────────────────────────────────────┤      │
- GNSS ───NMEA──► GpsReader ───manager.update("gps")──────────────────────────────────────────┘      │
+ modem ──AT────► ModemReader ─manager.update("gps")──────────────────────────────────────────┘      │
                                                                                                    ▼
                                             MqttPublisher ◄── on_telemetry ──┤ ──► MQTT: telemetria e saúde
                                               EventSender ◄── pending_events ─┘ ──► MQTT: evento + janela
@@ -46,8 +46,10 @@ O principal não importa o OpenCV, o MediaPipe nem o NumPy: da `vision/` ele só
 5. **Esp32Reader** (thread) lê as linhas de texto do ESP32 pela USB (`$A`, `$O`, `$S`...), confere o
    checksum e a `seq`, manda a hora (`$H`) e a taxa do OBD (`$C`) e alimenta `manager.update()` com
    IMU e OBD-II. As amostras só entram depois de 10 linhas válidas seguidas. Ver [o leitor do ESP32](#leitor-do-esp32).
-6. **GpsReader** (thread) lê as frases RMC do receptor GNSS e grava `{"lat", "lon", "speed"}` (km/h)
-   em `manager.update("gps")`. Sem fix, grava `{}`, para o evento não levar uma posição velha.
+6. **ModemReader** (thread, `events/modem_reader.py`, Issue #21) liga o GNSS do modem A7670SA pela
+   porta AT, lê a posição a 1 Hz (`AT+CGNSSINFO`) e grava `{"lat", "lon", "speed"}` (km/h) em
+   `manager.update("gps")`. Sem posição, grava `{}`, para o evento não levar uma posição velha. Guarda
+   também a hora do GNSS e a da operadora ([o modem](#o-modem-gnss-e-hora)).
 7. **MqttPublisher** (`events/mqtt_publisher.py`, Issue #18) publica cada linha de 1/s da telemetria e,
    a cada 60 s, a saúde, com QoS 0, e se reconecta sozinho quando o broker (ou o túnel até ele) volta.
 8. **EventSender** (thread, `events/event_sender.py`) manda cada evento quando a janela de ±10 s fecha:
@@ -310,10 +312,9 @@ inteiro, e um `| tee` morreria junto, antes de escrever o resumo.
 | `VGUARD_DATA`    | `dados`                      | Pasta no cartão SD                    |
 | `VGUARD_ESP32`   | `/dev/vguard-esp32`          | USB do ESP32 (no notebook, `/dev/ttyUSB0`) |
 | `VGUARD_OBD_HZ`  | `12.5`                       | Taxa do OBD pedida ao ESP32 pelo `$C` (1 a 20, até 1 casa) |
-| `VGUARD_GPS`     | `/dev/serial0`               | UART ligada ao receptor GNSS          |
+| `VGUARD_MODEM_AT` | `/dev/vguard-modem-at`; sem ele, a interface 04 em `/dev/serial/by-id` | A porta AT do modem (GNSS e hora) |
 | `VGUARD_VISION_PYTHON` | o venv 3.11 da Pi; sem ele, o Python do principal | O Python do programa da visão |
 | `VGUARD_PYTHON`  | o `venv-principal`; sem ele, o `.venv` ou o atual | O Python do principal nas ferramentas (`tools/`) |
-| `VGUARD_GPS_BAUD`| `9600`                       | Velocidade da UART do GNSS            |
 | `VGUARD_BACKEND` | `https://vguard.example/api` | URL do backend; as fotos vão a `<URL>/events/<event_id>/photo` |
 | `VGUARD_DEVICE`  | `vguard-01`                  | O `device_id`: o meio dos tópicos MQTT e o `X-Device-Id` |
 | `VGUARD_TOKEN_FILE` | vazio                     | Arquivo com o token do backend (`Authorization: Bearer`); na bancada, `~/vguard-mqtt/token` |
@@ -407,6 +408,36 @@ VGUARD_WIFI=<a rede da bancada> \
   --seconds 300 --evento-a 60 --data-dir /home/vguard/vguard/dados-ensaio-1
 ```
 
+## O modem: GNSS e hora
+
+O `ModemReader` (`events/modem_reader.py`, Issue #21) fala com a porta AT do modem A7670SA (a interface
+USB `04`; os números `ttyUSB` andam conforme o que está na USB). A cada abertura da porta:
+
+1. `AT` a cada 1 s até o `OK` (nos primeiros segundos a porta não aceita escrita), e o `ATE0`;
+2. o `AT+CGNSSPWR?`; desligado, o `AT+CGNSSPWR=1`, porque o GNSS volta desligado a cada partida do
+   modem; depois o `AT+CGNSSPWR?` a cada 2 s até ligar, por até 60 s;
+3. o `AT+CGNSSINFO` a 1 Hz: com posição, `update("gps", {"lat", "lon", "speed"})` (a velocidade vem em
+   nós e vira km/h); sem posição, `update("gps", {})`; `ERROR`, o GNSS desligou, e volta ao passo 2;
+4. o `AT+CCLK?` a cada 60 s: a hora da operadora, com o fuso.
+
+```
++CGNSSINFO: 3,10,,04,00,25.4361572,S,49.2688103,W,101126,214056.00,952.1,3.956,,4.40,2.46,3.65,05
+            modo,GPS,GLONASS,BEIDOU,GALILEO,lat,N/S,lon,E/W,data,hora UTC,altitude,velocidade,rumo,PDOP,HDOP,VDOP
+```
+
+As horas do GNSS e da operadora ficam em `gnss_time` e `operator_time`, e a diferença para o relógio da
+Pi vai ao log. No log:
+
+```
+INFO modem: porta AT pronta (/dev/serial/by-id/usb-SIMCom_…-if04-port0)
+INFO modem: GNSS ligado em 8 s
+INFO modem: GNSS: primeira posição em 98 s (10 satélites GPS, HDOP 2.46)
+INFO modem: relógio da Pi − GNSS: +0.3 s
+WARNING modem: GNSS: sem posição
+INFO modem: GNSS: posição de volta depois de 40 s
+WARNING modem: GNSS desligou (ERROR); ligando de novo
+```
+
 ## O que fica no SD
 
 ```
@@ -447,7 +478,7 @@ python3 -B vision/test_calibration.py
 ```
 
 ```bash
-(cd events && python3 test_event_manager.py && python3 test_event_sender.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_gps_reader.py && python3 test_pi_monitor.py && python3 test_vision_process.py)
+(cd events && python3 test_event_manager.py && python3 test_event_sender.py && python3 test_sync.py && python3 test_esp32_reader.py && python3 test_modem_reader.py && python3 test_pi_monitor.py && python3 test_vision_process.py)
 (cd events && /home/vguard/vguard/venv-principal/bin/python test_mqtt_publisher.py)     # o MQTT: paho e mosquitto
 python3 -B test_vguard.py
 (cd tools && python3 test_vision_bench.py)
@@ -459,7 +490,7 @@ Se já estiver dentro de `vision/` ou `events/`, rode só os `python3 test_*.py`
 `events/test_vision_process.py` usa uma visão falsa (`events/fake_vision.py`) que fala o protocolo do canal;
 `vision/test_program.py` roda o programa da visão de verdade com um vídeo sintético (precisa do venv da visão).
 O `test_vguard.py` confere que o principal não importa o OpenCV, o MediaPipe nem o NumPy.
-`events/test_esp32_reader.py` e `events/test_gps_reader.py` usam um ESP32 e um receptor falsos num pty.
+`events/test_esp32_reader.py` e `events/test_modem_reader.py` usam um ESP32 e um modem falsos num pty.
 `events/test_mqtt_publisher.py` inicia um `mosquitto` de verdade numa porta livre; sem o `paho-mqtt` ou o
 `mosquitto`, os testes dele são pulados, com o motivo. O `test_event_sender.py` usa um publicador falso.
 Os testes de `events/` precisam de Linux (na Pi ou no WSL).
@@ -480,9 +511,7 @@ esses eventos com registros reais. Na Pi, use o interpretador 3.11 validado acim
 
 ## Pendências
 
-- **GPS (RF02):** o `GpsReader` está testado com um receptor falso. Falta conferir com o módulo
-  real a porta, a velocidade (`VGUARD_GPS`, `VGUARD_GPS_BAUD`) e se ele envia RMC. O PPS e o
-  acerto do relógio da Pi (gpsd/chrony) ficam fora do leitor; se o gpsd ocupar a porta, o leitor
-  passa a ler do gpsd.
+- **GPS (RF02):** a velocidade do `AT+CGNSSINFO` é tratada em nós, como no manual; falta conferir
+  no carro, contra a do OBD. Entregar a hora do modem ao chrony fica para o ticket 7 (#19).
 - **Responsabilidade:** adaptações para execução conjunta são mantidas neste repositório;
   não há sincronização automática com `visao` ou `gerenciador_eventos`. Os originais são preservados.
